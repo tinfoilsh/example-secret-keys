@@ -1,0 +1,29 @@
+cvm-version: "0.0.0-dev-secrets.1"
+
+cpus: 4
+memory: 4096
+
+shim:
+  upstream-port: 8080
+  tls-mode: self-signed
+
+containers:
+  - name: "example-secret-keys"
+    image: "docker.io/library/nginx:alpine"
+    restart: always
+    read_only: false
+    cap_add: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "KILL"]
+    secrets: [EXAMPLE_KEY]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "example-secret-keys: EXAMPLE_KEY len=${#EXAMPLE_KEY}"
+        cat > /etc/nginx/conf.d/default.conf <<EOF
+        server {
+          listen 8080 default_server;
+          location /health       { return 200 'ok\n'; }
+          location /secret-check { return 200 'EXAMPLE_KEY len=${#EXAMPLE_KEY}\n'; }
+        }
+        EOF
+        nginx -g 'daemon off;'

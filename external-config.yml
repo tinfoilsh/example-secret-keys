@@ -1,0 +1,4 @@
+vault:
+  # Local secrets server URL (e.g. an ngrok tunnel to ./server).
+  url: "https://unfilled-elective-ecosphere.ngrok-free.dev"
+  repo: "tinfoilsh/example-secret-keys"
