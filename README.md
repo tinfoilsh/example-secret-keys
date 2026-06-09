@@ -42,31 +42,43 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 ## End-to-end (dev-launch on box2)
 
 1. **Publish the workload attestation**
+
    ```bash
    git tag v0.0.1 && git push origin v0.0.1
    ```
+
    `release.yml` runs, attests the deployment under this repo via sigstore.
 
 2. **Run the local secrets server**
+
    ```bash
    cd server
    echo '{"EXAMPLE_KEY":"my-real-key-value"}' > secrets.json
    go run . -addr :8099 -secrets secrets.json &
    ngrok http 8099
    ```
+
    Put the public URL into `external-config.yml`'s `vault.url`.
 
 3. **Dev-launch the CVM**
    Same shape as `secrets-demo/confidential-secret-demo`'s runbook — non-debug,
    exact cmdline (`tinfoil-config-hash = sha256(tinfoil-config.yml)`,
    `roothash = manifest.root`), pointing tinfoild at this `tinfoil-config.yml`
-   + `external-config.yml`.
+   - `external-config.yml`.
 
 4. **Verify through the shim**
    ```bash
    curl -k https://localhost:<http_port>/secret-check  # → EXAMPLE_KEY len=N
    ```
    Host only saw secret **names** + a release count, never any value.
+
+## In real deploys
+
+`external-config.yml` is per-deployment data tinfoild gets at launch: this is just here since we don't have another way to do this yet.
+
+In the future, we should do: User fills a form, controlplane stores it against the deployment, tinfoild writes those fields into the external-config slot at launch. The yaml is just the dev-launch shortcut for the same slot.
+
+Same logic for the POC password — eventually injected per-account by tinfoild, not hardcoded.
 
 ## Threat model — what this POC does and doesn't cover
 
