@@ -86,33 +86,64 @@ func loadSecrets(path string) (map[string]string, error) {
 
 func handleFetch(secrets map[string]string, sigClient *sigstore.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		from := r.RemoteAddr
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			from = xff + " (via " + r.RemoteAddr + ")"
+		}
+		log.Printf("/fetch %s from %s", r.Method, from)
+
 		if r.Method != http.MethodPost {
+			log.Printf("  rejected: method %s not allowed", r.Method)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req fetchRequest
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			log.Printf("  rejected: read body: %v", err)
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		log.Printf("  body: %d bytes", len(body))
+
+		var req fetchRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			log.Printf("  rejected: decode body: %v (first 200 bytes: %s)", err, snippet(body, 200))
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		log.Printf("  claim: repo=%q secret_refs=%v password=%q", req.Repo, req.SecretRefs, req.Password)
+		if req.Bundle == nil {
+			log.Printf("  bundle: <nil>")
+		} else {
+			sigstorePresent := len(req.Bundle.SigstoreBundle) > 0 && string(req.Bundle.SigstoreBundle) != "null"
+			reportPresent := req.Bundle.EnclaveAttestationReport != nil
+			reportFormat := ""
+			if reportPresent {
+				reportFormat = string(req.Bundle.EnclaveAttestationReport.Format)
+			}
+			log.Printf("  bundle: digest=%q sigstore=%t vcek=%t report=%t report_format=%q",
+				req.Bundle.Digest, sigstorePresent, req.Bundle.VCEK != "", reportPresent, reportFormat)
+		}
+
 		if req.Password != pocPassword {
-			log.Printf("rejected: bad password")
+			log.Printf("  rejected: bad password")
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		if req.Repo != workloadRepo {
-			log.Printf("rejected: claimed repo %q != %q", req.Repo, workloadRepo)
+			log.Printf("  rejected: claimed repo %q != served %q", req.Repo, workloadRepo)
 			http.Error(w, "forbidden: repo not served", http.StatusForbidden)
 			return
 		}
 		if req.Bundle == nil || req.Bundle.EnclaveAttestationReport == nil {
+			log.Printf("  rejected: missing attestation bundle / report")
 			http.Error(w, "missing attestation", http.StatusBadRequest)
 			return
 		}
 
 		pkW, err := verifyEnclave(sigClient, req.Repo, req.Bundle)
 		if err != nil {
-			log.Printf("rejected: %v", err)
+			log.Printf("  rejected: verify: %v", err)
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
 			return
 		}
@@ -120,15 +151,17 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client) http.Han
 		released := filterSecrets(secrets, req.SecretRefs)
 		plaintext, err := json.Marshal(released)
 		if err != nil {
+			log.Printf("  rejected: marshal: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		enc, ct, err := sealTo(pkW, plaintext)
 		if err != nil {
+			log.Printf("  rejected: seal: %v", err)
 			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		log.Printf("released %d/%d secret(s) for %s: %v", len(released), len(req.SecretRefs), req.Repo, req.SecretRefs)
+		log.Printf("  released %d/%d secret(s): %v", len(released), len(req.SecretRefs), req.SecretRefs)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fetchResponse{Enc: enc, Ciphertext: ct})
 	}
@@ -146,6 +179,9 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 		if err != nil {
 			return "", fmt.Errorf("latest digest: %w", err)
 		}
+		log.Printf("  verify: fetched latest digest from github: %s", digest)
+	} else {
+		log.Printf("  verify: using request-pinned digest: %s", digest)
 	}
 	sigBundle := bundle.SigstoreBundle
 	if len(sigBundle) == 0 || string(sigBundle) == "null" {
@@ -153,16 +189,22 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 		if err != nil {
 			return "", fmt.Errorf("fetch sigstore bundle: %w", err)
 		}
+		log.Printf("  verify: fetched sigstore bundle from github: %d bytes", len(sigBundle))
+	} else {
+		log.Printf("  verify: using request-supplied sigstore bundle: %d bytes", len(sigBundle))
 	}
 	codeMeasurement, err := sigClient.VerifyAttestation(sigBundle, repo, digest)
 	if err != nil {
 		return "", fmt.Errorf("sigstore: %w", err)
 	}
+	log.Printf("  verify: sigstore code measurement: type=%s registers=%v", codeMeasurement.Type, codeMeasurement.Registers)
 
 	enclaveVerification, err := bundle.EnclaveAttestationReport.VerifyWithVCEK(nil)
 	if err != nil {
 		return "", fmt.Errorf("snp quote: %w", err)
 	}
+	log.Printf("  verify: snp quote measurement: type=%s registers=%v hpke_pk=%s",
+		enclaveVerification.Measurement.Type, enclaveVerification.Measurement.Registers, enclaveVerification.HPKEPublicKey)
 
 	if err := codeMeasurement.Equals(enclaveVerification.Measurement); err != nil {
 		return "", fmt.Errorf("measurement mismatch: %w", err)
@@ -170,7 +212,16 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 	if enclaveVerification.HPKEPublicKey == "" {
 		return "", fmt.Errorf("quote carries no HPKE key in REPORTDATA")
 	}
+	log.Printf("  verify: code/enclave measurements bind ✓")
 	return enclaveVerification.HPKEPublicKey, nil
+}
+
+// snippet returns up to n bytes of b as a string, for log previews of malformed bodies.
+func snippet(b []byte, n int) string {
+	if len(b) > n {
+		b = b[:n]
+	}
+	return string(b)
 }
 
 func filterSecrets(all map[string]string, names []string) map[string]string {
