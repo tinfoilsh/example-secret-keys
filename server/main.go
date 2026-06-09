@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
 	"github.com/tinfoilsh/tinfoil-go/verifier/github"
@@ -199,21 +200,26 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 	}
 	log.Printf("  verify: sigstore code measurement: type=%s registers=%v", codeMeasurement.Type, codeMeasurement.Registers)
 
-	enclaveVerification, err := bundle.EnclaveAttestationReport.VerifyWithVCEK(nil)
+	// Use local verifyReport (vcek.go) instead of tinfoil-go's VerifyWithVCEK,
+	// which only ships the Genoa AMD cert chain — box2's CPU is Turin.
+	vcekDER, err := bundleVCEK(bundle)
+	if err != nil {
+		return "", fmt.Errorf("vcek: %w", err)
+	}
+	enclaveMeasurement, hpkeKey, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
 	if err != nil {
 		return "", fmt.Errorf("snp quote: %w", err)
 	}
-	log.Printf("  verify: snp quote measurement: type=%s registers=%v hpke_pk=%s",
-		enclaveVerification.Measurement.Type, enclaveVerification.Measurement.Registers, enclaveVerification.HPKEPublicKey)
+	log.Printf("  verify: snp quote measurement=%s hpke_pk=%s", enclaveMeasurement, hpkeKey)
 
-	if err := codeMeasurement.Equals(enclaveVerification.Measurement); err != nil {
-		return "", fmt.Errorf("measurement mismatch: %w", err)
+	if len(codeMeasurement.Registers) == 0 || !strings.EqualFold(codeMeasurement.Registers[0], enclaveMeasurement) {
+		return "", fmt.Errorf("code/enclave measurement mismatch: code=%v enclave=%s", codeMeasurement.Registers, enclaveMeasurement)
 	}
-	if enclaveVerification.HPKEPublicKey == "" {
+	if hpkeKey == "" {
 		return "", fmt.Errorf("quote carries no HPKE key in REPORTDATA")
 	}
 	log.Printf("  verify: code/enclave measurements bind ✓")
-	return enclaveVerification.HPKEPublicKey, nil
+	return hpkeKey, nil
 }
 
 // snippet returns up to n bytes of b as a string, for log previews of malformed bodies.
