@@ -1,0 +1,38 @@
+# Measured workload config. measure-image-action hashes this file
+# (sha256 → tinfoil-config-hash) and bakes it into the cmdline it measures,
+# so the dev-launch must boot with this exact file. Anything per-deployment
+# (vault URL, etc.) belongs in external-config.yml so the measurement stays
+# reproducible across deployments.
+#
+# cvm-version must point at a cvmimage release that includes the vault-fetch
+# boot stage (stage 3b). Use the prerelease tag cut off the `secret-management`
+# branch in tinfoilsh/cvmimage once it ships.
+cvm-version: "0.0.0-secrets-poc.1"
+
+cpus: 4
+memory: 4096
+
+shim:
+  upstream-port: 8080
+  tls-mode: self-signed
+
+containers:
+  - name: "example-secret-keys"
+    image: "docker.io/library/nginx:alpine"
+    restart: always
+    read_only: false
+    cap_add: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "KILL"]
+    secrets: [EXAMPLE_KEY]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "example-secret-keys: EXAMPLE_KEY len=${#EXAMPLE_KEY}"
+        cat > /etc/nginx/conf.d/default.conf <<EOF
+        server {
+          listen 8080 default_server;
+          location /health       { return 200 'ok\n'; }
+          location /secret-check { return 200 'EXAMPLE_KEY len=${#EXAMPLE_KEY}\n'; }
+        }
+        EOF
+        nginx -g 'daemon off;'
