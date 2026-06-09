@@ -1,12 +1,4 @@
-# Measured workload config. measure-image-action hashes this file
-# (sha256 → tinfoil-config-hash) and bakes it into the cmdline it measures,
-# so the dev-launch must boot with this exact file. Anything per-deployment
-# (vault URL, etc.) belongs in external-config.yml so the measurement stays
-# reproducible across deployments.
-#
-# cvm-version must point at a cvmimage release that includes the vault-fetch
-# boot stage (stage 3b). Use the prerelease tag cut off the `secret-management`
-# branch in tinfoilsh/cvmimage once it ships.
+# TODO: update this
 cvm-version: "0.0.0-secrets-poc.1"
 
 cpus: 4

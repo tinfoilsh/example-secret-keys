@@ -117,7 +117,8 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client) http.Han
 			return
 		}
 
-		plaintext, err := json.Marshal(filterSecrets(secrets, req.SecretRefs))
+		released := filterSecrets(secrets, req.SecretRefs)
+		plaintext, err := json.Marshal(released)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -127,7 +128,7 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client) http.Han
 			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		log.Printf("released %d secret(s) for %s", len(req.SecretRefs), req.Repo)
+		log.Printf("released %d/%d secret(s) for %s: %v", len(released), len(req.SecretRefs), req.Repo, req.SecretRefs)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fetchResponse{Enc: enc, Ciphertext: ct})
 	}

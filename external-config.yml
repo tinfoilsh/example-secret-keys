@@ -1,13 +1,4 @@
-# Host-authored, NOT measured. Provided to tinfoild at dev-launch time so
-# per-deployment data (like the vault URL) can change without breaking the
-# sigstore-attested measurement of this release.
-env:
-  DOMAIN: "example-secret-keys.box2.tinfoil.sh"
-
 vault:
   # Local secrets server URL (e.g. an ngrok tunnel to ./server).
-  # Replace before deploying.
   url: "https://REPLACE-ME.ngrok.app"
   repo: "tinfoilsh/example-secret-keys"
-  secrets: [EXAMPLE_KEY]
-  # digest: "sha256:..."   # optional release pin; omitted → server uses latest
