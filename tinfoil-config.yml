@@ -5,13 +5,10 @@ memory: 4096
 
 shim:
   upstream-port: 8080
-  tls-mode: self-signed
 
 containers:
   - name: "example-secret-keys"
     image: "docker.io/library/nginx:alpine"
-    restart: always
-    read_only: false
     cap_add: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "KILL"]
     secrets: [EXAMPLE_KEY]
     command:

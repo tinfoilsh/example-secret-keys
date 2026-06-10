@@ -27,8 +27,7 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
 )
 
-// fetchInfo is the HPKE info string bound into both seal and open; must match
-// cvmimage's vault.go.
+// fetchInfo is the HPKE info string in cvmimage vault.go
 const fetchInfo = "tinfoil-secrets-vault/fetch/v1"
 
 type fetchRequest struct {
