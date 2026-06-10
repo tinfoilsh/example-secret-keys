@@ -4,8 +4,8 @@
 // password, and HPKE-seals the requested secrets to the workload's per-boot
 // public key (which the SNP quote vouches for via REPORTDATA).
 //
-// Run locally, expose via ngrok (or similar), and put the public URL into
-// ../external-config.yml's `vault.url`. See ./README.md.
+// Run locally, expose via ngrok (or similar), and pass the public URL to
+// ../dev-launch.sh as VAULT_URL. See ./README.md.
 package main
 
 import (

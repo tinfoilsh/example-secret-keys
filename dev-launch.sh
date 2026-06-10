@@ -5,14 +5,14 @@
 #   1. ssh -L 8080:localhost:8080 box2.tinfoil.sh  (in another shell)
 #   2. tinfoilsh/example-secret-keys has been tagged + released, so its sigstore
 #      attestation exists (the cmdline + config we use here come from there)
-#   3. external-config.yml's vault.url is set (not the REPLACE-ME placeholder)
 #
 # Usage: ./dev-launch.sh [name]
 #
 # Flow: GET /deployments/preview to pull the canonical config + cmdline (these
 # are mutually consistent — the cmdline contains tinfoil-config-hash = sha256
-# of the config). Then POST /dev-launch with our external-config.yml so
-# stage 3b knows which vault to call.
+# of the config). Then POST /dev-launch with a top-level vault block so stage
+# 3b knows which vault to call — tinfoild merges it into external-config under
+# `vault:` (same way controlplane will once merged).
 
 set -euo pipefail
 
@@ -35,11 +35,6 @@ VAULT_PASSWORD="${VAULT_PASSWORD:-poc-shared-secret-do-not-use}"
 # Box3-side path to the locally-built cvmimage. Must contain
 # tinfoilcvm.{vmlinuz,initrd,raw,hash}.
 CVMIMAGE_DIR="${CVMIMAGE_DIR:-/home/ubuntu/daniel-workspace/cvmimage}"
-
-if grep -q "REPLACE-ME" external-config.yml; then
-  echo "error: external-config.yml still has REPLACE-ME — set vault.url first" >&2
-  exit 1
-fi
 
 echo "GET $TINFOILD/deployments/preview?repo=$REPO" >&2
 PREVIEW=$(curl -sS -m 10 "$TINFOILD/deployments/preview?repo=$REPO")
@@ -64,7 +59,7 @@ if [ -z "$LOCAL_HASH" ] || [ "$LOCAL_HASH" = "null" ]; then
 fi
 CMDLINE=$(echo "$CMDLINE" | sed -E "s/roothash=[a-f0-9]+/roothash=$LOCAL_HASH/")
 
-EXTERNAL=$(printf 'env:\n  DOMAIN: "%s"\n%s\n' "$DOMAIN" "$(cat external-config.yml)")
+EXTERNAL=$(printf 'env:\n  DOMAIN: "%s"\n' "$DOMAIN")
 
 PAYLOAD=$(jq -n \
   --arg name "$NAME" \

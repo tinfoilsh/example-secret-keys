@@ -29,7 +29,7 @@ the CVM. It runs on your machine; the workload's boot stage 3b dials out to it.
    ngrok http 8099
    ```
 
-4. Put the public URL into `../external-config.yml`'s `vault.url`.
+4. Pass the public URL to `../dev-launch.sh` as `VAULT_URL`.
 
 ## Outbound network the server needs
 
