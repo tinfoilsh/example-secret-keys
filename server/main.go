@@ -11,6 +11,7 @@ package main
 import (
 	"crypto/ecdh"
 	"crypto/hpke"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -133,7 +134,7 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client, skipAtte
 				req.Bundle.Digest, sigstorePresent, req.Bundle.VCEK != "", reportPresent, reportFormat)
 		}
 
-		if req.Token != pocToken {
+		if subtle.ConstantTimeCompare([]byte(req.Token), []byte(pocToken)) != 1 {
 			log.Printf("  rejected: bad token")
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
