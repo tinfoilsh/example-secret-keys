@@ -11,9 +11,9 @@ Tinfoil's infrastructure.
 tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under this repo)
                                                   │
   cvmimage stage 3b on boot ─▶ POST /fetch ─▶ user's server (./server)
-                              {quote, repo, password}
+                              {quote, repo, token}
                                                   │
-                              verify(sigstore, SNP quote, password) → pk_W from REPORTDATA
+                              verify(sigstore, SNP quote, token) → pk_W from REPORTDATA
                                                   │
                               ◀── HPKE-sealed EXAMPLE_KEY
                               container starts with EXAMPLE_KEY in env
@@ -33,9 +33,8 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 - A cvmimage release that includes the vault-fetch boot stage (`secret-management`
   branch in `tinfoilsh/cvmimage`, eventually a prerelease tag). Pin it in
   `tinfoil-config.yml`'s `cvm-version`.
-- The shared POC password in `server/main.go` matches the value in
-  `cvmimage/tinfoil/cmd/boot/vault.go`. Both are hardcoded for the POC; the
-  real version moves this to per-account injection by tinfoild.
+- The shared POC token in `server/main.go` is hardcoded for the POC; the real
+  version moves this to per-account injection by tinfoild.
 
 ## End-to-end (dev-launch on box2)
 
@@ -62,7 +61,7 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
    Same shape as `secrets-demo/confidential-secret-demo`'s runbook — non-debug,
    exact cmdline (`tinfoil-config-hash = sha256(tinfoil-config.yml)`,
    `roothash = manifest.root`), pointing tinfoild at this `tinfoil-config.yml`.
-   The vault URL + password flow in as a top-level `vault:` block on the
+   The vault URL + token flow in as a top-level `vault:` block on the
    `/dev-launch` body; tinfoild merges them into the external-config the CVM
    sees.
 
@@ -74,13 +73,13 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 
 ## In real deploys
 
-Controlplane stores the vault URL + password against the deployment and
+Controlplane stores the vault URL + token against the deployment and
 forwards them to tinfoild on `/deployments`; tinfoild writes them into the
 external-config slot the CVM sees. `dev-launch.sh` is the dev-time shortcut
-for the same slot — it takes `VAULT_URL` / `VAULT_PASSWORD` as env vars and
+for the same slot — it takes `VAULT_URL` / `VAULT_TOKEN` as env vars and
 sends the same top-level `vault:` block.
 
-Same logic for the POC password — eventually injected per-account by tinfoild, not hardcoded.
+Same logic for the POC token — eventually injected per-account by tinfoild, not hardcoded.
 
 ## Threat model — what this POC does and doesn't cover
 
@@ -89,7 +88,7 @@ from the user's server into the enclave's `sk_W`, and the AMD-signed quote
 proves the enclave is running the code this repo attested to.
 
 **Not covered (yet).** A different user could clone this repo, build the same
-workload, and present the shared POC password (which is in this repo's source).
-The real fix is the per-account password injection by tinfoild — `cvmimage`
+workload, and present the shared POC token (which is in this repo's source).
+The real fix is the per-account token injection by tinfoild — `cvmimage`
 keeps the field, but the value comes from tinfoild at deploy time, scoped to
 the account that deployed.

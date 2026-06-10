@@ -30,7 +30,7 @@ REPO="tinfoilsh/example-secret-keys"
 # pre-injects it into additional_data, so the fallback never runs.
 DOMAIN="${DOMAIN:-example-secret-keys.dev-launch.tinfoil.dev}"
 VAULT_URL="${VAULT_URL:-https://unfilled-elective-ecosphere.ngrok-free.dev}"
-VAULT_PASSWORD="${VAULT_PASSWORD:-poc-shared-secret-do-not-use}"
+VAULT_TOKEN="${VAULT_TOKEN:-poc-shared-secret-do-not-use}"
 
 # Box3-side path to the locally-built cvmimage. Must contain
 # tinfoilcvm.{vmlinuz,initrd,raw,hash}.
@@ -69,7 +69,7 @@ PAYLOAD=$(jq -n \
   --arg repo "$REPO" \
   --arg tag "$RESOLVED_TAG" \
   --arg vault_url "$VAULT_URL" \
-  --arg vault_password "$VAULT_PASSWORD" \
+  --arg vault_token "$VAULT_TOKEN" \
   --arg kernel "$CVMIMAGE_DIR/tinfoilcvm.vmlinuz" \
   --arg initrd "$CVMIMAGE_DIR/tinfoilcvm.initrd" \
   --arg disk "$CVMIMAGE_DIR/tinfoilcvm.raw" \
@@ -85,7 +85,7 @@ PAYLOAD=$(jq -n \
     initrd_file: $initrd,
     disk_file: $disk,
     skip_manifest: true,
-    vault: {url: $vault_url, password: $vault_password}
+    vault: {url: $vault_url, token: $vault_token}
   }')
 
 echo "POST $TINFOILD/dev-launch  name=$NAME repo=$REPO tag=$RESOLVED_TAG roothash=$LOCAL_HASH" >&2

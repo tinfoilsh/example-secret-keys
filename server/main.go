@@ -1,7 +1,7 @@
 // Command server is the user-side secrets endpoint for the example-secret-keys
 // POC. It listens on /fetch, verifies the booting workload's SEV-SNP attestation
 // against the sigstore-attested measurement of this repo, checks the shared POC
-// password, and HPKE-seals the requested secrets to the workload's per-boot
+// token, and HPKE-seals the requested secrets to the workload's per-boot
 // public key (which the SNP quote vouches for via REPORTDATA).
 //
 // Run locally, expose via ngrok (or similar), and pass the public URL to
@@ -26,10 +26,10 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
 )
 
-// pocPassword must match cvmimage/tinfoil/cmd/boot/vault.go's constant.
-// Anyone with cvmimage source can read this — that's the POC tradeoff; the
-// real version moves it to per-account injection by tinfoild.
-const pocPassword = "poc-shared-secret-do-not-use"
+// pocToken is the shared bearer credential the workload must present in its
+// fetch request. Hardcoded for the POC; the real version has tinfoild inject
+// a per-account token at deploy time so it never lives in public source.
+const pocToken = "poc-shared-secret-do-not-use"
 
 // fetchInfo is the HPKE info string bound into both seal and open; must match
 // cvmimage's vault.go.
@@ -43,7 +43,7 @@ type fetchRequest struct {
 	Repo       string              `json:"repo"`
 	SecretRefs []string            `json:"secret_refs"`
 	Bundle     *attestation.Bundle `json:"bundle"`
-	Password   string              `json:"password"`
+	Token      string              `json:"token"`
 }
 
 type fetchResponse struct {
@@ -119,7 +119,7 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client, skipAtte
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		log.Printf("  claim: repo=%q secret_refs=%v password=%q", req.Repo, req.SecretRefs, req.Password)
+		log.Printf("  claim: repo=%q secret_refs=%v token=%q", req.Repo, req.SecretRefs, req.Token)
 		if req.Bundle == nil {
 			log.Printf("  bundle: <nil>")
 		} else {
@@ -133,8 +133,8 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client, skipAtte
 				req.Bundle.Digest, sigstorePresent, req.Bundle.VCEK != "", reportPresent, reportFormat)
 		}
 
-		if req.Password != pocPassword {
-			log.Printf("  rejected: bad password")
+		if req.Token != pocToken {
+			log.Printf("  rejected: bad token")
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
