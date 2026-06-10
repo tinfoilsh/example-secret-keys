@@ -33,8 +33,6 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 - A cvmimage release that includes the vault-fetch boot stage (`secret-management`
   branch in `tinfoilsh/cvmimage`, eventually a prerelease tag). Pin it in
   `tinfoil-config.yml`'s `cvm-version`.
-- The shared POC token in `server/main.go` is hardcoded for the POC; the real
-  version moves this to per-account injection by tinfoild.
 
 ## End-to-end (dev-launch on box2)
 
@@ -50,8 +48,10 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 
    ```bash
    cd server
-   echo '{"EXAMPLE_KEY":"my-real-key-value"}' > secrets.json
-   go run . -addr :8099 -secrets secrets.json &
+   cat > secrets.json <<'EOF'
+   {"tinfoilsh/example-secret-keys": {"EXAMPLE_KEY":"my-real-key-value"}}
+   EOF
+   go run . -addr :8099 -secrets secrets.json -token <bearer-token> &
    ngrok http 8099
    ```
 

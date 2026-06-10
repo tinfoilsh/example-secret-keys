@@ -1,11 +1,11 @@
-// Command server is the user-side secrets endpoint for the example-secret-keys
-// POC. It listens on /fetch, verifies the booting workload's SEV-SNP attestation
-// against the sigstore-attested measurement of this repo, checks the shared POC
-// token, and HPKE-seals the requested secrets to the workload's per-boot
-// public key (which the SNP quote vouches for via REPORTDATA).
+// Command server is the user-side secrets endpoint. It listens on /fetch,
+// verifies the bearer token, looks up the requesting workload's repo in the
+// server-side allowlist, verifies the booting workload's SEV-SNP attestation
+// against the sigstore-attested measurement of that repo, and HPKE-seals the
+// requested secrets to the workload's per-boot public key (which the SNP
+// quote vouches for via REPORTDATA).
 //
-// Run locally, expose via ngrok (or similar), and pass the public URL to
-// ../dev-launch.sh as VAULT_URL. See ./README.md.
+
 package main
 
 import (
@@ -27,18 +27,9 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
 )
 
-// pocToken is the shared bearer credential the workload must present in its
-// fetch request. Hardcoded for the POC; the real version has tinfoild inject
-// a per-account token at deploy time so it never lives in public source.
-const pocToken = "poc-shared-secret-do-not-use"
-
 // fetchInfo is the HPKE info string bound into both seal and open; must match
 // cvmimage's vault.go.
 const fetchInfo = "tinfoil-secrets-vault/fetch/v1"
-
-// workloadRepo is the only repo this server releases secrets for. Hardcoded
-// because this server is the trust anchor for one workload's deployment.
-const workloadRepo = "tinfoilsh/example-secret-keys"
 
 type fetchRequest struct {
 	Repo       string              `json:"repo"`
@@ -54,15 +45,27 @@ type fetchResponse struct {
 
 func main() {
 	addr := flag.String("addr", ":8099", "listen address")
-	secretsPath := flag.String("secrets", "secrets.json", `path to a JSON map of secrets, e.g. {"EXAMPLE_KEY":"value"}`)
+	secretsPath := flag.String("secrets", "secrets.json", `path to a JSON map keyed by repo, e.g. {"tinfoilsh/example-secret-keys": {"EXAMPLE_KEY": "value"}}`)
+	tokenFlag := flag.String("token", "", "shared bearer token (or set VAULT_TOKEN env)")
 	insecureSkipAttestation := flag.Bool("insecure-skip-attestation", false,
 		"DEV ONLY: skip sigstore code-identity check. SNP quote + HPKE seal are still verified, "+
-			"but the booted enclave is not bound to a published release of this repo.")
+			"but the booted enclave is not bound to a published release of any repo.")
 	flag.Parse()
 
-	secrets, err := loadSecrets(*secretsPath)
+	token := *tokenFlag
+	if token == "" {
+		token = os.Getenv("VAULT_TOKEN")
+	}
+	if token == "" {
+		log.Fatalf("--token flag or VAULT_TOKEN env required")
+	}
+
+	repos, err := loadSecrets(*secretsPath)
 	if err != nil {
 		log.Fatalf("loading secrets: %v", err)
+	}
+	if len(repos) == 0 {
+		log.Fatalf("no repos configured in %s", *secretsPath)
 	}
 
 	sigClient, err := sigstore.NewClient()
@@ -75,25 +78,28 @@ func main() {
 	}
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	http.HandleFunc("/fetch", handleFetch(secrets, sigClient, *insecureSkipAttestation))
+	http.HandleFunc("/fetch", handleFetch(repos, token, sigClient, *insecureSkipAttestation))
 
-	log.Printf("example-secret-keys server listening on %s (repo=%s)", *addr, workloadRepo)
+	log.Printf("vault server listening on %s", *addr)
+	for repo, secrets := range repos {
+		log.Printf("  serving %s (%d secrets)", repo, len(secrets))
+	}
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
 
-func loadSecrets(path string) (map[string]string, error) {
+func loadSecrets(path string) (map[string]map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var secrets map[string]string
-	if err := json.Unmarshal(data, &secrets); err != nil {
+	var repos map[string]map[string]string
+	if err := json.Unmarshal(data, &repos); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	return secrets, nil
+	return repos, nil
 }
 
-func handleFetch(secrets map[string]string, sigClient *sigstore.Client, skipAttestation bool) http.HandlerFunc {
+func handleFetch(repos map[string]map[string]string, token string, sigClient *sigstore.Client, skipAttestation bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		from := r.RemoteAddr
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -134,13 +140,14 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client, skipAtte
 				req.Bundle.Digest, sigstorePresent, req.Bundle.VCEK != "", reportPresent, reportFormat)
 		}
 
-		if subtle.ConstantTimeCompare([]byte(req.Token), []byte(pocToken)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(req.Token), []byte(token)) != 1 {
 			log.Printf("  rejected: bad token")
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if req.Repo != workloadRepo {
-			log.Printf("  rejected: claimed repo %q != served %q", req.Repo, workloadRepo)
+		repoSecrets, ok := repos[req.Repo]
+		if !ok {
+			log.Printf("  rejected: repo %q not served", req.Repo)
 			http.Error(w, "forbidden: repo not served", http.StatusForbidden)
 			return
 		}
@@ -157,7 +164,7 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client, skipAtte
 			return
 		}
 
-		released := filterSecrets(secrets, req.SecretRefs)
+		released := filterSecrets(repoSecrets, req.SecretRefs)
 		plaintext, err := json.Marshal(released)
 		if err != nil {
 			log.Printf("  rejected: marshal: %v", err)
