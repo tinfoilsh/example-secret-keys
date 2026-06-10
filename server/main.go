@@ -54,6 +54,9 @@ type fetchResponse struct {
 func main() {
 	addr := flag.String("addr", ":8099", "listen address")
 	secretsPath := flag.String("secrets", "secrets.json", `path to a JSON map of secrets, e.g. {"EXAMPLE_KEY":"value"}`)
+	insecureSkipAttestation := flag.Bool("insecure-skip-attestation", false,
+		"DEV ONLY: skip sigstore code-identity check. SNP quote + HPKE seal are still verified, "+
+			"but the booted enclave is not bound to a published release of this repo.")
 	flag.Parse()
 
 	secrets, err := loadSecrets(*secretsPath)
@@ -66,8 +69,12 @@ func main() {
 		log.Fatalf("sigstore client: %v", err)
 	}
 
+	if *insecureSkipAttestation {
+		log.Printf("WARNING: --insecure-skip-attestation set; releasing secrets to ANY SNP-attested enclave (dev only)")
+	}
+
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	http.HandleFunc("/fetch", handleFetch(secrets, sigClient))
+	http.HandleFunc("/fetch", handleFetch(secrets, sigClient, *insecureSkipAttestation))
 
 	log.Printf("example-secret-keys server listening on %s (repo=%s)", *addr, workloadRepo)
 	log.Fatal(http.ListenAndServe(*addr, nil))
@@ -85,7 +92,7 @@ func loadSecrets(path string) (map[string]string, error) {
 	return secrets, nil
 }
 
-func handleFetch(secrets map[string]string, sigClient *sigstore.Client) http.HandlerFunc {
+func handleFetch(secrets map[string]string, sigClient *sigstore.Client, skipAttestation bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		from := r.RemoteAddr
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -142,7 +149,7 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client) http.Han
 			return
 		}
 
-		pkW, err := verifyEnclave(sigClient, req.Repo, req.Bundle)
+		pkW, err := verifyEnclave(sigClient, req.Repo, req.Bundle, skipAttestation)
 		if err != nil {
 			log.Printf("  rejected: verify: %v", err)
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
@@ -172,9 +179,30 @@ func handleFetch(secrets map[string]string, sigClient *sigstore.Client) http.Han
 // Bundle cvmimage sends (just the SNP report + optional digest): sigstore
 // proves the repo built to measurement M; the SNP quote proves the enclave is
 // running M and holds pk_W in REPORTDATA. Returns the hardware-attested pk_W.
-func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle) (string, error) {
+func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, skipAttestation bool) (string, error) {
+	// SNP path runs in both modes — proves the report came from a real AMD CPU
+	// in confidential mode and binds REPORTDATA to the per-boot HPKE pubkey.
+	// Use local verifyReport (vcek.go) instead of tinfoil-go's VerifyWithVCEK,
+	// which only ships the Genoa AMD cert chain — box2's CPU is Turin.
+	vcekDER, err := bundleVCEK(bundle)
+	if err != nil {
+		return "", fmt.Errorf("vcek: %w", err)
+	}
+	enclaveMeasurement, hpkeKey, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
+	if err != nil {
+		return "", fmt.Errorf("snp quote: %w", err)
+	}
+	log.Printf("  verify: snp quote measurement=%s hpke_pk=%s", enclaveMeasurement, hpkeKey)
+	if hpkeKey == "" {
+		return "", fmt.Errorf("quote carries no HPKE key in REPORTDATA")
+	}
+
+	if skipAttestation {
+		log.Printf("  verify: SKIPPING sigstore code-identity check (insecure-skip-attestation); releasing to enclave=%s", enclaveMeasurement)
+		return hpkeKey, nil
+	}
+
 	digest := bundle.Digest
-	var err error
 	if digest == "" {
 		digest, err = github.FetchLatestDigest(repo)
 		if err != nil {
@@ -200,23 +228,8 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 	}
 	log.Printf("  verify: sigstore code measurement: type=%s registers=%v", codeMeasurement.Type, codeMeasurement.Registers)
 
-	// Use local verifyReport (vcek.go) instead of tinfoil-go's VerifyWithVCEK,
-	// which only ships the Genoa AMD cert chain — box2's CPU is Turin.
-	vcekDER, err := bundleVCEK(bundle)
-	if err != nil {
-		return "", fmt.Errorf("vcek: %w", err)
-	}
-	enclaveMeasurement, hpkeKey, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
-	if err != nil {
-		return "", fmt.Errorf("snp quote: %w", err)
-	}
-	log.Printf("  verify: snp quote measurement=%s hpke_pk=%s", enclaveMeasurement, hpkeKey)
-
 	if len(codeMeasurement.Registers) == 0 || !strings.EqualFold(codeMeasurement.Registers[0], enclaveMeasurement) {
 		return "", fmt.Errorf("code/enclave measurement mismatch: code=%v enclave=%s", codeMeasurement.Registers, enclaveMeasurement)
-	}
-	if hpkeKey == "" {
-		return "", fmt.Errorf("quote carries no HPKE key in REPORTDATA")
 	}
 	log.Printf("  verify: code/enclave measurements bind ✓")
 	return hpkeKey, nil
