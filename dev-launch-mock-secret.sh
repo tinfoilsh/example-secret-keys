@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sibling of dev-launch.sh that tests the *pre-existing* path:
 # secrets are baked into external_config (as controlplane does in prod),
-# no vault: block sent. Proves our branch changes don't break the
+# no vault token sent. Proves our branch changes don't break the
 # established flow.
 #
 # Prereqs: same as dev-launch.sh — ssh tunnel up, cvmimage built on box3.

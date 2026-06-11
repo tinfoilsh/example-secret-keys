@@ -1,18 +1,14 @@
 // Command server is the user-side secrets endpoint. It listens on /fetch,
 // verifies the bearer token, looks up the requesting workload's repo in the
 // server-side allowlist, verifies the booting workload's SEV-SNP attestation
-// against the sigstore-attested measurement of that repo, and HPKE-seals the
-// requested secrets to the workload's per-boot public key (which the SNP
-// quote vouches for via REPORTDATA).
+// against the sigstore-attested measurement of that repo, and releases the
+// requested secrets
 //
 
 package main
 
 import (
-	"crypto/ecdh"
-	"crypto/hpke"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,9 +23,6 @@ import (
 	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
 )
 
-// fetchInfo is the HPKE info string in cvmimage vault.go
-const fetchInfo = "tinfoil-secrets-vault/fetch/v1"
-
 type fetchRequest struct {
 	Repo       string              `json:"repo"`
 	SecretRefs []string            `json:"secret_refs"`
@@ -37,17 +30,12 @@ type fetchRequest struct {
 	Token      string              `json:"token"`
 }
 
-type fetchResponse struct {
-	Enc        []byte `json:"enc"`
-	Ciphertext []byte `json:"ciphertext"`
-}
-
 func main() {
 	addr := flag.String("addr", ":8099", "listen address")
 	secretsPath := flag.String("secrets", "secrets.json", `path to a JSON map keyed by repo, e.g. {"tinfoilsh/example-secret-keys": {"EXAMPLE_KEY": "value"}}`)
 	tokenFlag := flag.String("token", "", "shared bearer token (or set VAULT_TOKEN env)")
 	insecureSkipAttestation := flag.Bool("insecure-skip-attestation", false,
-		"DEV ONLY: skip sigstore code-identity check. SNP quote + HPKE seal are still verified, "+
+		"DEV ONLY: skip sigstore code-identity check. The SNP quote is still verified, "+
 			"but the booted enclave is not bound to a published release of any repo.")
 	flag.Parse()
 
@@ -156,64 +144,48 @@ func handleFetch(repos map[string]map[string]string, token string, sigClient *si
 			return
 		}
 
-		pkW, err := verifyEnclave(sigClient, req.Repo, req.Bundle, skipAttestation)
-		if err != nil {
+		if err := verifyEnclave(sigClient, req.Repo, req.Bundle, skipAttestation); err != nil {
 			log.Printf("  rejected: verify: %v", err)
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
 			return
 		}
 
 		released := filterSecrets(repoSecrets, req.SecretRefs)
-		plaintext, err := json.Marshal(released)
-		if err != nil {
-			log.Printf("  rejected: marshal: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		enc, ct, err := sealTo(pkW, plaintext)
-		if err != nil {
-			log.Printf("  rejected: seal: %v", err)
-			http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
 		log.Printf("  released %d/%d secret(s): %v", len(released), len(req.SecretRefs), req.SecretRefs)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(fetchResponse{Enc: enc, Ciphertext: ct})
+		_ = json.NewEncoder(w).Encode(released)
 	}
 }
 
 // verifyEnclave mirrors SecureClient.VerifyFromBundle's chain but on the small
 // Bundle cvmimage sends (just the SNP report + optional digest): sigstore
 // proves the repo built to measurement M; the SNP quote proves the enclave is
-// running M and holds pk_W in REPORTDATA. Returns the hardware-attested pk_W.
-func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, skipAttestation bool) (string, error) {
+// running M.
+func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, skipAttestation bool) error {
 	// SNP path runs in both modes — proves the report came from a real AMD CPU
-	// in confidential mode and binds REPORTDATA to the per-boot HPKE pubkey.
+	// in confidential mode.
 	// Use local verifyReport (vcek.go) instead of tinfoil-go's VerifyWithVCEK,
 	// which only ships the Genoa AMD cert chain — box2's CPU is Turin.
 	vcekDER, err := bundleVCEK(bundle)
 	if err != nil {
-		return "", fmt.Errorf("vcek: %w", err)
+		return fmt.Errorf("vcek: %w", err)
 	}
-	enclaveMeasurement, hpkeKey, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
+	enclaveMeasurement, _, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
 	if err != nil {
-		return "", fmt.Errorf("snp quote: %w", err)
+		return fmt.Errorf("snp quote: %w", err)
 	}
-	log.Printf("  verify: snp quote measurement=%s hpke_pk=%s", enclaveMeasurement, hpkeKey)
-	if hpkeKey == "" {
-		return "", fmt.Errorf("quote carries no HPKE key in REPORTDATA")
-	}
+	log.Printf("  verify: snp quote measurement=%s", enclaveMeasurement)
 
 	if skipAttestation {
 		log.Printf("  verify: SKIPPING sigstore code-identity check (insecure-skip-attestation); releasing to enclave=%s", enclaveMeasurement)
-		return hpkeKey, nil
+		return nil
 	}
 
 	digest := bundle.Digest
 	if digest == "" {
 		digest, err = github.FetchLatestDigest(repo)
 		if err != nil {
-			return "", fmt.Errorf("latest digest: %w", err)
+			return fmt.Errorf("latest digest: %w", err)
 		}
 		log.Printf("  verify: fetched latest digest from github: %s", digest)
 	} else {
@@ -223,7 +195,7 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 	if len(sigBundle) == 0 || string(sigBundle) == "null" {
 		sigBundle, err = github.FetchAttestationBundle(repo, digest)
 		if err != nil {
-			return "", fmt.Errorf("fetch sigstore bundle: %w", err)
+			return fmt.Errorf("fetch sigstore bundle: %w", err)
 		}
 		log.Printf("  verify: fetched sigstore bundle from github: %d bytes", len(sigBundle))
 	} else {
@@ -231,15 +203,15 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 	}
 	codeMeasurement, err := sigClient.VerifyAttestation(sigBundle, repo, digest)
 	if err != nil {
-		return "", fmt.Errorf("sigstore: %w", err)
+		return fmt.Errorf("sigstore: %w", err)
 	}
 	log.Printf("  verify: sigstore code measurement: type=%s registers=%v", codeMeasurement.Type, codeMeasurement.Registers)
 
 	if len(codeMeasurement.Registers) == 0 || !strings.EqualFold(codeMeasurement.Registers[0], enclaveMeasurement) {
-		return "", fmt.Errorf("code/enclave measurement mismatch: code=%v enclave=%s", codeMeasurement.Registers, enclaveMeasurement)
+		return fmt.Errorf("code/enclave measurement mismatch: code=%v enclave=%s", codeMeasurement.Registers, enclaveMeasurement)
 	}
 	log.Printf("  verify: code/enclave measurements bind ✓")
-	return hpkeKey, nil
+	return nil
 }
 
 // snippet returns up to n bytes of b as a string, for log previews of malformed bodies.
@@ -258,27 +230,4 @@ func filterSecrets(all map[string]string, names []string) map[string]string {
 		}
 	}
 	return out
-}
-
-// sealTo HPKE-seals plaintext to the workload's per-boot public key (raw X25519,
-// hex-encoded). Suite: RFC 9180 X25519 / HKDF-SHA256 / AES-256-GCM — matches
-// the circl-based receiver in cvmimage's vault.go.
-func sealTo(pkHex string, plaintext []byte) (enc, ct []byte, err error) {
-	pkBytes, err := hex.DecodeString(pkHex)
-	if err != nil {
-		return nil, nil, fmt.Errorf("decoding pk_w: %w", err)
-	}
-	pk, err := hpke.DHKEM(ecdh.X25519()).NewPublicKey(pkBytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parsing pk_w: %w", err)
-	}
-	enc, sender, err := hpke.NewSender(pk, hpke.HKDFSHA256(), hpke.AES256GCM(), []byte(fetchInfo))
-	if err != nil {
-		return nil, nil, err
-	}
-	ct, err = sender.Seal(nil, plaintext)
-	if err != nil {
-		return nil, nil, err
-	}
-	return enc, ct, nil
 }

@@ -6,7 +6,8 @@ whose SEV-SNP quote matches the sigstore-attested measurement of this repo and
 presents the shared POC token.
 
 This server is `dockerignore`d out of the workload image — it never runs in
-the CVM. It runs on your machine; the workload's boot stage 3b dials out to it.
+the CVM. It runs on your machine; the workload's vault-secrets boot stage
+dials out to it at the `vault-url` in the measured config.
 
 ## Setup
 
@@ -33,7 +34,8 @@ the CVM. It runs on your machine; the workload's boot stage 3b dials out to it.
    ngrok http 8099
    ```
 
-4. Pass the public URL to `../dev-launch.sh` as `VAULT_URL`.
+4. Make sure the public URL matches `vault-url` in the released
+   `tinfoil-config.yml` (it's measured — changing it means a new tag).
 
 ## Outbound network the server needs
 
@@ -49,6 +51,7 @@ the CVM. It runs on your machine; the workload's boot stage 3b dials out to it.
   whose `repo` claim isn't in the map get 403.
 - The shared bearer token is supplied via `-token` / `VAULT_TOKEN` and applies
   to every served repo (one operator, one server, one token).
-- Secrets are sealed to the workload's per-boot HPKE public key (X25519 /
-  HKDF-SHA256 / AES-256-GCM, RFC 9180), bound to the enclave by REPORTDATA in
-  the AMD-signed SNP report. Nothing on the wire is plaintext.
+- Secrets are released over the TLS channel once the SNP quote and sigstore
+  code identity verify. The CVM terminates TLS inside the enclave; with ngrok
+  in the dev path, ngrok terminates the public leg and can see released
+  values — a production vault serves TLS itself.

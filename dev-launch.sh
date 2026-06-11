@@ -10,9 +10,10 @@
 #
 # Flow: GET /deployments/preview to pull the canonical config + cmdline (these
 # are mutually consistent — the cmdline contains tinfoil-config-hash = sha256
-# of the config). Then POST /dev-launch with a top-level vault block so stage
-# 3b knows which vault to call — tinfoild merges it into external-config under
-# `vault:` (same way controlplane will once merged).
+# of the config). The released config carries vault-url, so it flows in
+# measured, exactly as in prod. The token goes as vault_token on the
+# /dev-launch body — tinfoild writes it into external-config as `vault-token`
+# (same way controlplane will once updated).
 
 set -euo pipefail
 
@@ -29,7 +30,6 @@ REPO="tinfoilsh/example-secret-keys"
 # Cloudflare, so it 401s. In prod controlplane mints the token itself and
 # pre-injects it into additional_data, so the fallback never runs.
 DOMAIN="${DOMAIN:-example-secret-keys.dev-launch.tinfoil.dev}"
-VAULT_URL="${VAULT_URL:-https://unfilled-elective-ecosphere.ngrok-free.dev}"
 VAULT_TOKEN="${VAULT_TOKEN:-poc-shared-secret-do-not-use}"
 
 # Box3-side path to the locally-built cvmimage. Must contain
@@ -68,7 +68,6 @@ PAYLOAD=$(jq -n \
   --arg cmdline "$CMDLINE" \
   --arg repo "$REPO" \
   --arg tag "$RESOLVED_TAG" \
-  --arg vault_url "$VAULT_URL" \
   --arg vault_token "$VAULT_TOKEN" \
   --arg kernel "$CVMIMAGE_DIR/tinfoilcvm.vmlinuz" \
   --arg initrd "$CVMIMAGE_DIR/tinfoilcvm.initrd" \
@@ -85,7 +84,7 @@ PAYLOAD=$(jq -n \
     initrd_file: $initrd,
     disk_file: $disk,
     skip_manifest: true,
-    vault: {url: $vault_url, token: $vault_token}
+    vault_token: $vault_token
   }')
 
 echo "POST $TINFOILD/dev-launch  name=$NAME repo=$REPO tag=$RESOLVED_TAG roothash=$LOCAL_HASH" >&2

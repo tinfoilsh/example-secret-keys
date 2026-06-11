@@ -1,21 +1,22 @@
 # example-secret-keys
 
 POC of a Tinfoil workload whose secrets come from a **user-controlled** local
-server rather than Tinfoil's secret custody (KMS). At boot, the CVM's stage 3b
-sends its SEV-SNP quote to the user's server; the server verifies the quote +
-the sigstore-attested measurement of this repo, then HPKE-seals the requested
-secret(s) to the workload's per-boot public key. Plaintext never touches
+server rather than Tinfoil's secret custody (KMS). At boot, the CVM's
+vault-secrets stage sends its SEV-SNP quote to the vault-url declared in the
+**measured** config; the server verifies the quote + the sigstore-attested
+measurement of this repo, then releases the requested secret(s) over the TLS
+channel, which terminates inside the enclave. Plaintext never touches
 Tinfoil's infrastructure.
 
 ```
 tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under this repo)
                                                   │
-  cvmimage stage 3b on boot ─▶ POST /fetch ─▶ user's server (./server)
-                              {quote, repo, token}
+  cvmimage vault stage on boot ─▶ POST /fetch ─▶ user's server (./server)
+            (vault-url measured)  {quote, repo, token}
                                                   │
-                              verify(sigstore, SNP quote, token) → pk_W from REPORTDATA
+                              verify(sigstore, SNP quote, token)
                                                   │
-                              ◀── HPKE-sealed EXAMPLE_KEY
+                              ◀── EXAMPLE_KEY over TLS
                               container starts with EXAMPLE_KEY in env
 ```
 
@@ -55,15 +56,17 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
    ngrok http 8099
    ```
 
-   Pass the public URL to `dev-launch.sh` as `VAULT_URL`.
+   The public URL must match the `vault-url` in the released
+   `tinfoil-config.yml` — changing it means a new tag (step 1).
 
 3. **Dev-launch the CVM**
    Same shape as `secrets-demo/confidential-secret-demo`'s runbook — non-debug,
    exact cmdline (`tinfoil-config-hash = sha256(tinfoil-config.yml)`,
    `roothash = manifest.root`), pointing tinfoild at this `tinfoil-config.yml`.
-   The vault URL + token flow in as a top-level `vault:` block on the
-   `/dev-launch` body; tinfoild merges them into the external-config the CVM
-   sees.
+   The vault URL is part of the measured config (`vault-url:`), so it arrives
+   exactly as released. The token flows as `vault_token` on the `/dev-launch`
+   body; tinfoild writes it into the external-config the CVM sees as
+   `vault-token`.
 
 4. **Verify through the shim**
    ```bash
@@ -73,22 +76,28 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 
 ## In real deploys
 
-Controlplane stores the vault URL + token against the deployment and
-forwards them to tinfoild on `/deployments`; tinfoild writes them into the
-external-config slot the CVM sees. `dev-launch.sh` is the dev-time shortcut
-for the same slot — it takes `VAULT_URL` / `VAULT_TOKEN` as env vars and
-sends the same top-level `vault:` block.
+The vault URL ships in the repo's `tinfoil-config.yml`, so it's covered by
+the measurement — neither Tinfoil nor the host provider can repoint a
+deployment at another vault. Controlplane stores only the token against the
+deployment and forwards it to tinfoild as `vault_token` on `/deployments`;
+tinfoild writes it into the external-config slot the CVM sees. `dev-launch.sh`
+is the dev-time shortcut for the same slot — it takes `VAULT_TOKEN` as an
+env var.
 
 Same logic for the POC token — eventually injected per-account by tinfoild, not hardcoded.
 
 ## Threat model — what this POC does and doesn't cover
 
-**Covered.** Tinfoil never sees `EXAMPLE_KEY`. Secrets are sealed end-to-end
-from the user's server into the enclave's `sk_W`, and the AMD-signed quote
-proves the enclave is running the code this repo attested to.
+**Covered.** Tinfoil never sees `EXAMPLE_KEY`. Secrets travel over TLS from
+the user's server to the enclave, where the TLS session terminates inside the
+CVM, and the AMD-signed quote proves the enclave is running the code this
+repo attested to before anything is released.
 
 **Not covered (yet).** A different user could clone this repo, build the same
 workload, and present the shared POC token (which is in this repo's source).
 The real fix is the per-account token injection by tinfoild — `cvmimage`
 keeps the field, but the value comes from tinfoild at deploy time, scoped to
 the account that deployed.
+
+Also dev-setup-only: ngrok terminates the public TLS leg, so ngrok can see
+released values. A production vault serves TLS itself.
