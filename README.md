@@ -2,19 +2,27 @@
 
 POC of a Tinfoil workload whose secrets come from a **user-controlled** local
 server rather than Tinfoil's secret custody (KMS). At boot, the CVM's
-vault-secrets stage sends its SEV-SNP quote to the vault-url declared in the
-**measured** config; the server verifies the quote + the sigstore-attested
-measurement of this repo, then releases the requested secret(s) over the TLS
-channel, which terminates inside the enclave. Plaintext never touches
-Tinfoil's infrastructure.
+vault-secrets stage fetches a single-use challenge nonce from the vault-url
+declared in the **measured** config, binds it into a fresh SEV-SNP quote's
+REPORTDATA, and presents that quote; the server verifies the quote + the
+sigstore-attested measurement of this repo + its own nonce, then releases the
+requested secret(s) over the TLS channel, which terminates inside the
+enclave. Plaintext never touches Tinfoil's infrastructure.
+
+The challenge round is the same shape as the KBS RCAR handshake
+(Request → Challenge → Attestation → Response) from confidential-containers.
 
 ```
 tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under this repo)
                                                   │
-  cvmimage vault stage on boot ─▶ POST /fetch ─▶ user's server (./server)
-            (vault-url measured)  {quote, repo, token}
+  cvmimage vault stage on boot ─▶ GET /challenge ─▶ user's server (./server)
+            (vault-url measured) ◀── single-use nonce ──┘
+                  │
+       fresh SNP quote, nonce in REPORTDATA
+                  │
+                  ─▶ POST /fetch {quote, repo, token, nonce}
                                                   │
-                              verify(sigstore, SNP quote, token)
+                              verify(sigstore, SNP quote, nonce, token)
                                                   │
                               ◀── EXAMPLE_KEY over TLS
                               container starts with EXAMPLE_KEY in env
@@ -92,6 +100,12 @@ Same logic for the POC token — eventually injected per-account by tinfoild, no
 the user's server to the enclave, where the TLS session terminates inside the
 CVM, and the AMD-signed quote proves the enclave is running the code this
 repo attested to before anything is released.
+
+The challenge nonce makes the quote a *requester* proof, not just an
+existence proof: published boot quotes + a leaked token are not enough to
+fetch secrets, because each release requires a fresh quote minted over the
+vault's own single-use nonce — something only a live measured enclave can
+produce.
 
 **Not covered (yet).** A different user could clone this repo, build the same
 workload, and present the shared POC token (which is in this repo's source).

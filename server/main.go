@@ -8,7 +8,10 @@
 package main
 
 import (
+	"bytes"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,6 +20,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
 	"github.com/tinfoilsh/tinfoil-go/verifier/github"
@@ -28,6 +33,53 @@ type fetchRequest struct {
 	SecretRefs []string            `json:"secret_refs"`
 	Bundle     *attestation.Bundle `json:"bundle"`
 	Token      string              `json:"token"`
+	Nonce      string              `json:"nonce"`
+}
+
+// nonceTTL bounds how long a challenge stays redeemable.
+const nonceTTL = 2 * time.Minute
+
+// nonceStore issues single-use challenge nonces (KBS RCAR-style): /challenge
+// hands one out, /fetch burns it. A fetch only succeeds with a quote whose
+// REPORTDATA carries a nonce we issued — proof the requester is a live
+// enclave, not a replayed quote and a leaked token.
+type nonceStore struct {
+	mu     sync.Mutex
+	nonces map[string]time.Time // hex nonce → expiry
+}
+
+func newNonceStore() *nonceStore {
+	return &nonceStore{nonces: map[string]time.Time{}}
+}
+
+func (s *nonceStore) issue() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	nonce := hex.EncodeToString(raw)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for n, exp := range s.nonces {
+		if time.Now().After(exp) {
+			delete(s.nonces, n)
+		}
+	}
+	s.nonces[nonce] = time.Now().Add(nonceTTL)
+	return nonce, nil
+}
+
+// redeem burns the nonce. It is single-use whether or not the fetch that
+// carries it ends up succeeding.
+func (s *nonceStore) redeem(nonce string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp, ok := s.nonces[nonce]
+	if !ok {
+		return false
+	}
+	delete(s.nonces, nonce)
+	return time.Now().Before(exp)
 }
 
 func main() {
@@ -64,8 +116,11 @@ func main() {
 		log.Printf("WARNING: --insecure-skip-attestation set; releasing secrets to ANY SNP-attested enclave (dev only)")
 	}
 
+	nonces := newNonceStore()
+
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	http.HandleFunc("/fetch", handleFetch(repos, token, sigClient, *insecureSkipAttestation))
+	http.HandleFunc("/challenge", handleChallenge(nonces))
+	http.HandleFunc("/fetch", handleFetch(repos, token, sigClient, nonces, *insecureSkipAttestation))
 
 	log.Printf("vault server listening on %s", *addr)
 	for repo, secrets := range repos {
@@ -86,7 +141,21 @@ func loadSecrets(path string) (map[string]map[string]string, error) {
 	return repos, nil
 }
 
-func handleFetch(repos map[string]map[string]string, token string, sigClient *sigstore.Client, skipAttestation bool) http.HandlerFunc {
+func handleChallenge(nonces *nonceStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		nonce, err := nonces.issue()
+		if err != nil {
+			log.Printf("/challenge: issuing nonce: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("/challenge from %s: issued %s…", r.RemoteAddr, nonce[:8])
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"nonce": nonce})
+	}
+}
+
+func handleFetch(repos map[string]map[string]string, token string, sigClient *sigstore.Client, nonces *nonceStore, skipAttestation bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		from := r.RemoteAddr
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -144,7 +213,19 @@ func handleFetch(repos map[string]map[string]string, token string, sigClient *si
 			return
 		}
 
-		if err := verifyEnclave(sigClient, req.Repo, req.Bundle, skipAttestation); err != nil {
+		nonce, err := hex.DecodeString(req.Nonce)
+		if err != nil || len(nonce) != 32 {
+			log.Printf("  rejected: malformed nonce %q", req.Nonce)
+			http.Error(w, "malformed nonce (GET /challenge first)", http.StatusBadRequest)
+			return
+		}
+		if !nonces.redeem(req.Nonce) {
+			log.Printf("  rejected: unknown, expired, or already-used nonce %s…", req.Nonce[:8])
+			http.Error(w, "forbidden: invalid nonce (GET /challenge first)", http.StatusForbidden)
+			return
+		}
+
+		if err := verifyEnclave(sigClient, req.Repo, req.Bundle, nonce, skipAttestation); err != nil {
 			log.Printf("  rejected: verify: %v", err)
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
 			return
@@ -159,22 +240,25 @@ func handleFetch(repos map[string]map[string]string, token string, sigClient *si
 
 // verifyEnclave mirrors SecureClient.VerifyFromBundle's chain but on the small
 // Bundle cvmimage sends (just the SNP report + optional digest): sigstore
-// proves the repo built to measurement M; the SNP quote proves the enclave is
-// running M.
-func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, skipAttestation bool) error {
+// proves the repo built to measurement M; the SNP quote proves a live enclave
+// running M produced it for this exchange (our nonce in REPORTDATA).
+func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, nonce []byte, skipAttestation bool) error {
 	// SNP path runs in both modes — proves the report came from a real AMD CPU
-	// in confidential mode.
+	// in confidential mode and was minted against our challenge.
 	// Use local verifyReport (vcek.go) instead of tinfoil-go's VerifyWithVCEK,
 	// which only ships the Genoa AMD cert chain — box2's CPU is Turin.
 	vcekDER, err := bundleVCEK(bundle)
 	if err != nil {
 		return fmt.Errorf("vcek: %w", err)
 	}
-	enclaveMeasurement, _, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
+	enclaveMeasurement, reportData, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
 	if err != nil {
 		return fmt.Errorf("snp quote: %w", err)
 	}
-	log.Printf("  verify: snp quote measurement=%s", enclaveMeasurement)
+	if !bytes.Equal(reportData[:32], nonce) {
+		return fmt.Errorf("quote REPORTDATA does not carry the challenge nonce")
+	}
+	log.Printf("  verify: snp quote measurement=%s nonce bound ✓", enclaveMeasurement)
 
 	if skipAttestation {
 		log.Printf("  verify: SKIPPING sigstore code-identity check (insecure-skip-attestation); releasing to enclave=%s", enclaveMeasurement)

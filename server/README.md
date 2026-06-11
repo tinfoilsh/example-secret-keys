@@ -51,7 +51,10 @@ dials out to it at the `vault-url` in the measured config.
   whose `repo` claim isn't in the map get 403.
 - The shared bearer token is supplied via `-token` / `VAULT_TOKEN` and applies
   to every served repo (one operator, one server, one token).
-- Secrets are released over the TLS channel once the SNP quote and sigstore
-  code identity verify. The CVM terminates TLS inside the enclave; with ngrok
-  in the dev path, ngrok terminates the public leg and can see released
-  values — a production vault serves TLS itself.
+- Releases follow a KBS RCAR-style handshake: `GET /challenge` issues a
+  single-use nonce (2-minute TTL), and `/fetch` only releases against a fresh
+  SNP quote carrying that nonce in REPORTDATA — a token alone is not enough.
+- Secrets are released over the TLS channel once the SNP quote, the nonce,
+  and the sigstore code identity verify. The CVM terminates TLS inside the
+  enclave; with ngrok in the dev path, ngrok terminates the public leg and
+  can see released values — a production vault serves TLS itself.

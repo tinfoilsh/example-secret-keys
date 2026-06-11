@@ -45,44 +45,44 @@ func parseReport(doc *attestation.Document) (*sevsnp.Report, error) {
 	return abi.ReportToProto(raw)
 }
 
-// verifyReport checks a SEV-SNP report and returns its measurement and the HPKE
-// key bound in REPORTDATA: the VCEK chains to the AMD root (ARK) via the ASK,
-// and the report is signed by the VCEK. tinfoil-go hardcodes Genoa, so we verify
-// here to support both Genoa (production) and Turin (box2); the product is taken
-// from the report.
-func verifyReport(doc *attestation.Document, vcekDER []byte) (measurement, hpkeKey string, err error) {
+// verifyReport checks a SEV-SNP report and returns its measurement and the
+// 64-byte REPORTDATA the guest bound into it: the VCEK chains to the AMD root
+// (ARK) via the ASK, and the report is signed by the VCEK. tinfoil-go
+// hardcodes Genoa, so we verify here to support both Genoa (production) and
+// Turin (box2); the product is taken from the report.
+func verifyReport(doc *attestation.Document, vcekDER []byte) (measurement string, reportData []byte, err error) {
 	raw, err := decodeReport(doc)
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
 	report, err := abi.ReportToProto(raw)
 	if err != nil {
-		return "", "", fmt.Errorf("parsing report: %w", err)
+		return "", nil, fmt.Errorf("parsing report: %w", err)
 	}
 	vcek, err := x509.ParseCertificate(vcekDER)
 	if err != nil {
-		return "", "", fmt.Errorf("parsing vcek: %w", err)
+		return "", nil, fmt.Errorf("parsing vcek: %w", err)
 	}
 	ask, ark, err := amdChain(reportProduct(report))
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
 	if err := ask.CheckSignatureFrom(ark); err != nil {
-		return "", "", fmt.Errorf("ASK not signed by ARK: %w", err)
+		return "", nil, fmt.Errorf("ASK not signed by ARK: %w", err)
 	}
 	if err := vcek.CheckSignatureFrom(ask); err != nil {
-		return "", "", fmt.Errorf("VCEK not signed by ASK: %w", err)
+		return "", nil, fmt.Errorf("VCEK not signed by ASK: %w", err)
 	}
 	// Verify against the raw report bytes (fixed offsets) — go-sev-guest's proto
 	// round-trip drops Turin (report v5) fields, breaking the signed component.
 	if err := verify.SnpReportSignature(raw, vcek); err != nil {
-		return "", "", fmt.Errorf("report signature: %w", err)
+		return "", nil, fmt.Errorf("report signature: %w", err)
 	}
 	rd := report.GetReportData()
 	if len(rd) < 64 {
-		return "", "", fmt.Errorf("report data too short")
+		return "", nil, fmt.Errorf("report data too short")
 	}
-	return hex.EncodeToString(report.GetMeasurement()), hex.EncodeToString(rd[32:64]), nil
+	return hex.EncodeToString(report.GetMeasurement()), rd, nil
 }
 
 // reportProduct picks the AMD product line from the report's chip-ID shape:
