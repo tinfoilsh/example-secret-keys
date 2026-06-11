@@ -8,7 +8,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -19,7 +18,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -243,25 +241,21 @@ func handleFetch(repos map[string]map[string]string, token string, sigClient *si
 // proves the repo built to measurement M; the SNP quote proves a live enclave
 // running M produced it for this exchange (our nonce in REPORTDATA).
 func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, nonce []byte, skipAttestation bool) error {
-	// SNP path runs in both modes — proves the report came from a real AMD CPU
-	// in confidential mode and was minted against our challenge.
-	// Use local verifyReport (vcek.go) instead of tinfoil-go's VerifyWithVCEK,
-	// which only ships the Genoa AMD cert chain — box2's CPU is Turin.
-	vcekDER, err := bundleVCEK(bundle)
-	if err != nil {
-		return fmt.Errorf("vcek: %w", err)
-	}
-	enclaveMeasurement, reportData, err := verifyReport(bundle.EnclaveAttestationReport, vcekDER)
+	// SNP verification runs in both modes — tinfoil-go checks the Genoa AMD
+	// cert chain and fetches the VCEK through kds-proxy.tinfoil.sh.
+	verification, err := bundle.EnclaveAttestationReport.Verify()
 	if err != nil {
 		return fmt.Errorf("snp quote: %w", err)
 	}
-	if !bytes.Equal(reportData[:32], nonce) {
+	// The vault quote carries the challenge nonce in REPORTDATA[:32], the
+	// slot tinfoil-go surfaces as TLSPublicKeyFP.
+	if verification.TLSPublicKeyFP != hex.EncodeToString(nonce) {
 		return fmt.Errorf("quote REPORTDATA does not carry the challenge nonce")
 	}
-	log.Printf("  verify: snp quote measurement=%s nonce bound ✓", enclaveMeasurement)
+	log.Printf("  verify: snp quote measurement=%v nonce bound ✓", verification.Measurement.Registers)
 
 	if skipAttestation {
-		log.Printf("  verify: SKIPPING sigstore code-identity check (insecure-skip-attestation); releasing to enclave=%s", enclaveMeasurement)
+		log.Printf("  verify: SKIPPING sigstore code-identity check (insecure-skip-attestation); releasing to enclave=%v", verification.Measurement.Registers)
 		return nil
 	}
 
@@ -291,8 +285,8 @@ func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.
 	}
 	log.Printf("  verify: sigstore code measurement: type=%s registers=%v", codeMeasurement.Type, codeMeasurement.Registers)
 
-	if len(codeMeasurement.Registers) == 0 || !strings.EqualFold(codeMeasurement.Registers[0], enclaveMeasurement) {
-		return fmt.Errorf("code/enclave measurement mismatch: code=%v enclave=%s", codeMeasurement.Registers, enclaveMeasurement)
+	if err := codeMeasurement.Equals(verification.Measurement); err != nil {
+		return fmt.Errorf("code/enclave measurement mismatch: %w", err)
 	}
 	log.Printf("  verify: code/enclave measurements bind ✓")
 	return nil
