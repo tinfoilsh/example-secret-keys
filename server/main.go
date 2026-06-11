@@ -1,16 +1,16 @@
 // Command server is the user-side secrets endpoint. It listens on /fetch,
 // verifies the bearer token, looks up the requesting workload's repo in the
 // server-side allowlist, verifies the booting workload's SEV-SNP attestation
-// against the sigstore-attested measurement of that repo, and releases the
-// requested secrets
+// against the sigstore-attested measurement of that repo, pins the request's
+// TLS client certificate to the attested TLS key, and releases the requested
+// secrets
 //
 
 package main
 
 import (
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,12 +18,11 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
-	"time"
 
 	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
 	"github.com/tinfoilsh/tinfoil-go/verifier/github"
 	"github.com/tinfoilsh/tinfoil-go/verifier/sigstore"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 type fetchRequest struct {
@@ -31,62 +30,22 @@ type fetchRequest struct {
 	SecretRefs []string            `json:"secret_refs"`
 	Bundle     *attestation.Bundle `json:"bundle"`
 	Token      string              `json:"token"`
-	Nonce      string              `json:"nonce"`
-}
-
-// nonceTTL bounds how long a challenge stays redeemable.
-const nonceTTL = 2 * time.Minute
-
-// nonceStore issues single-use challenge nonces (KBS RCAR-style): /challenge
-// hands one out, /fetch burns it. A fetch only succeeds with a quote whose
-// REPORTDATA carries a nonce we issued — proof the requester is a live
-// enclave, not a replayed quote and a leaked token.
-type nonceStore struct {
-	mu     sync.Mutex
-	nonces map[string]time.Time // hex nonce → expiry
-}
-
-func newNonceStore() *nonceStore {
-	return &nonceStore{nonces: map[string]time.Time{}}
-}
-
-func (s *nonceStore) issue() (string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
-	nonce := hex.EncodeToString(raw)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for n, exp := range s.nonces {
-		if time.Now().After(exp) {
-			delete(s.nonces, n)
-		}
-	}
-	s.nonces[nonce] = time.Now().Add(nonceTTL)
-	return nonce, nil
-}
-
-// redeem burns the nonce. It is single-use whether or not the fetch that
-// carries it ends up succeeding.
-func (s *nonceStore) redeem(nonce string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	exp, ok := s.nonces[nonce]
-	if !ok {
-		return false
-	}
-	delete(s.nonces, nonce)
-	return time.Now().Before(exp)
 }
 
 func main() {
-	addr := flag.String("addr", ":8099", "listen address")
+	addr := flag.String("addr", ":8099", "listen address (plain HTTP or --tls-cert/--tls-key mode)")
 	secretsPath := flag.String("secrets", "secrets.json", `path to a JSON map keyed by repo, e.g. {"tinfoilsh/example-secret-keys": {"EXAMPLE_KEY": "value"}}`)
 	tokenFlag := flag.String("token", "", "shared bearer token (or set VAULT_TOKEN env)")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file; serve HTTPS and request client certificates")
+	tlsKey := flag.String("tls-key", "", "TLS key file (with --tls-cert)")
+	acmeDomain := flag.String("acme-domain", "", "serve HTTPS on :443 with an automatic Let's Encrypt certificate for this domain")
+	acmeCache := flag.String("acme-cache", "acme-cache", "directory for cached ACME certificates (with --acme-domain)")
 	insecureSkipAttestation := flag.Bool("insecure-skip-attestation", false,
 		"DEV ONLY: skip sigstore code-identity check. The SNP quote is still verified, "+
 			"but the booted enclave is not bound to a published release of any repo.")
+	insecureSkipClientCert := flag.Bool("insecure-skip-client-cert", false,
+		"DEV ONLY: release secrets without binding the request to the enclave's TLS client "+
+			"certificate. Required in plain-HTTP mode or behind a TLS-terminating proxy (e.g. ngrok).")
 	flag.Parse()
 
 	token := *tokenFlag
@@ -95,6 +54,15 @@ func main() {
 	}
 	if token == "" {
 		log.Fatalf("--token flag or VAULT_TOKEN env required")
+	}
+
+	if (*tlsCert == "") != (*tlsKey == "") {
+		log.Fatalf("--tls-cert and --tls-key must be set together")
+	}
+	servingTLS := *acmeDomain != "" || *tlsCert != ""
+	if !servingTLS && !*insecureSkipClientCert {
+		log.Fatalf("plain HTTP cannot see the enclave's TLS client certificate: " +
+			"serve TLS with --acme-domain or --tls-cert/--tls-key, or acknowledge with --insecure-skip-client-cert (dev only)")
 	}
 
 	repos, err := loadSecrets(*secretsPath)
@@ -113,18 +81,37 @@ func main() {
 	if *insecureSkipAttestation {
 		log.Printf("WARNING: --insecure-skip-attestation set; releasing secrets to ANY SNP-attested enclave (dev only)")
 	}
-
-	nonces := newNonceStore()
+	if *insecureSkipClientCert {
+		log.Printf("WARNING: --insecure-skip-client-cert set; NOT binding requests to the enclave's attested TLS key (dev only)")
+	}
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	http.HandleFunc("/challenge", handleChallenge(nonces))
-	http.HandleFunc("/fetch", handleFetch(repos, token, sigClient, nonces, *insecureSkipAttestation))
+	http.HandleFunc("/fetch", handleFetch(repos, token, sigClient, *insecureSkipAttestation, *insecureSkipClientCert))
 
-	log.Printf("vault server listening on %s", *addr)
 	for repo, secrets := range repos {
 		log.Printf("  serving %s (%d secrets)", repo, len(secrets))
 	}
-	log.Fatal(http.ListenAndServe(*addr, nil))
+
+	switch {
+	case *acmeDomain != "":
+		m := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			Cache:      autocert.DirCache(*acmeCache),
+			HostPolicy: autocert.HostWhitelist(*acmeDomain),
+		}
+		cfg := m.TLSConfig()
+		cfg.ClientAuth = tls.RequestClientCert
+		srv := &http.Server{Addr: ":443", TLSConfig: cfg}
+		log.Printf("vault server listening on :443 (ACME cert for %s, cache %s)", *acmeDomain, *acmeCache)
+		log.Fatal(srv.ListenAndServeTLS("", ""))
+	case *tlsCert != "":
+		srv := &http.Server{Addr: *addr, TLSConfig: &tls.Config{ClientAuth: tls.RequestClientCert}}
+		log.Printf("vault server listening on %s (TLS cert %s)", *addr, *tlsCert)
+		log.Fatal(srv.ListenAndServeTLS(*tlsCert, *tlsKey))
+	default:
+		log.Printf("vault server listening on %s (plain HTTP)", *addr)
+		log.Fatal(http.ListenAndServe(*addr, nil))
+	}
 }
 
 func loadSecrets(path string) (map[string]map[string]string, error) {
@@ -139,21 +126,7 @@ func loadSecrets(path string) (map[string]map[string]string, error) {
 	return repos, nil
 }
 
-func handleChallenge(nonces *nonceStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		nonce, err := nonces.issue()
-		if err != nil {
-			log.Printf("/challenge: issuing nonce: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		log.Printf("/challenge from %s: issued %s…", r.RemoteAddr, nonce[:8])
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"nonce": nonce})
-	}
-}
-
-func handleFetch(repos map[string]map[string]string, token string, sigClient *sigstore.Client, nonces *nonceStore, skipAttestation bool) http.HandlerFunc {
+func handleFetch(repos map[string]map[string]string, token string, sigClient *sigstore.Client, skipAttestation, skipClientCert bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		from := r.RemoteAddr
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -211,19 +184,24 @@ func handleFetch(repos map[string]map[string]string, token string, sigClient *si
 			return
 		}
 
-		nonce, err := hex.DecodeString(req.Nonce)
-		if err != nil || len(nonce) != 32 {
-			log.Printf("  rejected: malformed nonce %q", req.Nonce)
-			http.Error(w, "malformed nonce (GET /challenge first)", http.StatusBadRequest)
-			return
-		}
-		if !nonces.redeem(req.Nonce) {
-			log.Printf("  rejected: unknown, expired, or already-used nonce %s…", req.Nonce[:8])
-			http.Error(w, "forbidden: invalid nonce (GET /challenge first)", http.StatusForbidden)
-			return
+		// The requester proof: the key that instantiated this TLS connection
+		// must be the key the attestation binds (checked in verifyEnclave).
+		connFP := ""
+		if !skipClientCert {
+			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				log.Printf("  rejected: no TLS client certificate on connection")
+				http.Error(w, "forbidden: TLS client certificate required", http.StatusForbidden)
+				return
+			}
+			connFP, err = attestation.ConnectionCertFP(*r.TLS)
+			if err != nil {
+				log.Printf("  rejected: client certificate fingerprint: %v", err)
+				http.Error(w, "forbidden: unreadable client certificate", http.StatusForbidden)
+				return
+			}
 		}
 
-		if err := verifyEnclave(sigClient, req.Repo, req.Bundle, nonce, skipAttestation); err != nil {
+		if err := verifyEnclave(sigClient, req.Repo, req.Bundle, connFP, skipAttestation); err != nil {
 			log.Printf("  rejected: verify: %v", err)
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
 			return
@@ -238,21 +216,24 @@ func handleFetch(repos map[string]map[string]string, token string, sigClient *si
 
 // verifyEnclave mirrors SecureClient.VerifyFromBundle's chain but on the small
 // Bundle cvmimage sends (just the SNP report + optional digest): sigstore
-// proves the repo built to measurement M; the SNP quote proves a live enclave
-// running M produced it for this exchange (our nonce in REPORTDATA).
-func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, nonce []byte, skipAttestation bool) error {
+// proves the repo built to measurement M; the SNP quote proves an enclave
+// running M generated the TLS key in REPORTDATA; the client certificate on
+// this very connection proves the requester holds that key right now.
+func verifyEnclave(sigClient *sigstore.Client, repo string, bundle *attestation.Bundle, connFP string, skipAttestation bool) error {
 	// SNP verification runs in both modes — tinfoil-go checks the Genoa AMD
 	// cert chain and fetches the VCEK through kds-proxy.tinfoil.sh.
 	verification, err := bundle.EnclaveAttestationReport.Verify()
 	if err != nil {
 		return fmt.Errorf("snp quote: %w", err)
 	}
-	// The vault quote carries the challenge nonce in REPORTDATA[:32], the
-	// slot tinfoil-go surfaces as TLSPublicKeyFP.
-	if verification.TLSPublicKeyFP != hex.EncodeToString(nonce) {
-		return fmt.Errorf("quote REPORTDATA does not carry the challenge nonce")
+	if connFP != "" {
+		if verification.TLSPublicKeyFP != connFP {
+			return fmt.Errorf("TLS client key (%s) does not match attested key (%s)", connFP, verification.TLSPublicKeyFP)
+		}
+		log.Printf("  verify: snp quote measurement=%v tls key bound to connection ✓", verification.Measurement.Registers)
+	} else {
+		log.Printf("  verify: snp quote measurement=%v (client binding SKIPPED)", verification.Measurement.Registers)
 	}
-	log.Printf("  verify: snp quote measurement=%v nonce bound ✓", verification.Measurement.Registers)
 
 	if skipAttestation {
 		log.Printf("  verify: SKIPPING sigstore code-identity check (insecure-skip-attestation); releasing to enclave=%v", verification.Measurement.Registers)

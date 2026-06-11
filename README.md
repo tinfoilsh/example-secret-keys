@@ -2,30 +2,32 @@
 
 POC of a Tinfoil workload whose secrets come from a **user-controlled** local
 server rather than Tinfoil's secret custody (KMS). At boot, the CVM's
-vault-secrets stage fetches a single-use challenge nonce from the vault-url
-declared in the **measured** config, binds it into a fresh SEV-SNP quote's
-REPORTDATA, and presents that quote; the server verifies the quote + the
-sigstore-attested measurement of this repo + its own nonce, then releases the
-requested secret(s) over the TLS channel, which terminates inside the
-enclave. Plaintext never touches Tinfoil's infrastructure.
+vault-secrets stage dials the vault-url declared in the **measured** config
+over mutual TLS, presenting a client certificate over the TLS key its boot
+attestation binds in REPORTDATA; the server verifies the quote + the
+sigstore-attested measurement of this repo + that the key on this very
+connection is the attested one, then releases the requested secret(s) over
+that same connection. Plaintext never touches Tinfoil's infrastructure.
 
-The challenge round is the same shape as the KBS RCAR handshake
-(Request → Challenge → Attestation → Response) from confidential-containers.
+The requester proof is pinned TLS in reverse: the same key-binding check
+Tinfoil clients run against an enclave's *server* certificate, applied by the
+vault to the enclave's *client* certificate.
 
 ```
 tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under this repo)
                                                   │
-  cvmimage vault stage on boot ─▶ GET /challenge ─▶ user's server (./server)
-            (vault-url measured) ◀── single-use nonce ──┘
-                  │
-       fresh SNP quote, nonce in REPORTDATA
-                  │
-                  ─▶ POST /fetch {quote, repo, token, nonce}
+  cvmimage vault stage on boot                    │
+            (vault-url measured)                  │
+                  │                               │
+                  ─▶ POST /fetch {boot quote, repo, token}
+                     mutual TLS: client certificate over the
+                     enclave's attested TLS key
                                                   │
-                              verify(sigstore, SNP quote, nonce, token)
+                     verify(sigstore, SNP quote, token,
+                            client key on connection == key in REPORTDATA)
                                                   │
-                              ◀── EXAMPLE_KEY over TLS
-                              container starts with EXAMPLE_KEY in env
+                  ◀── EXAMPLE_KEY over the same connection
+                  container starts with EXAMPLE_KEY in env
 ```
 
 ## Files
@@ -53,18 +55,29 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 
    `release.yml` runs, attests the deployment under this repo via sigstore.
 
-2. **Run the local secrets server**
+2. **Run the secrets server**
+
+   The server must terminate TLS itself for the client-certificate binding to
+   be real — client certificates cannot cross a TLS-terminating proxy. On a
+   public box with the DNS name in `vault-url`:
 
    ```bash
    cd server
    cat > secrets.json <<'EOF'
    {"tinfoilsh/example-secret-keys": {"EXAMPLE_KEY":"my-real-key-value"}}
    EOF
-   go run . -addr :8099 -secrets secrets.json -token <bearer-token> &
+   go run . -acme-domain vault.example.com -secrets secrets.json -token <bearer-token>
+   ```
+
+   For quick smoke tests behind a TLS-terminating tunnel (ngrok http), plain
+   HTTP still works but loses the requester binding:
+
+   ```bash
+   go run . -addr :8099 -secrets secrets.json -token <bearer-token> -insecure-skip-client-cert &
    ngrok http 8099
    ```
 
-   The public URL must match the `vault-url` in the released
+   Either way the public URL must match the `vault-url` in the released
    `tinfoil-config.yml` — changing it means a new tag (step 1).
 
 3. **Dev-launch the CVM**
@@ -101,11 +114,12 @@ the user's server to the enclave, where the TLS session terminates inside the
 CVM, and the AMD-signed quote proves the enclave is running the code this
 repo attested to before anything is released.
 
-The challenge nonce makes the quote a *requester* proof, not just an
+The client certificate makes the request a *requester* proof, not just an
 existence proof: published boot quotes + a leaked token are not enough to
-fetch secrets, because each release requires a fresh quote minted over the
-vault's own single-use nonce — something only a live measured enclave can
-produce.
+fetch secrets, because completing the TLS handshake requires the private key
+the quote binds in REPORTDATA — a key that never leaves the measured enclave.
+The boot quote can be old; the handshake is the liveness proof, so no nonce
+or fresh quote is needed.
 
 **Not covered (yet).** A different user could clone this repo, build the same
 workload, and present the shared POC token (which is in this repo's source).
@@ -113,5 +127,7 @@ The real fix is the per-account token injection by tinfoild — `cvmimage`
 keeps the field, but the value comes from tinfoild at deploy time, scoped to
 the account that deployed.
 
-Also dev-setup-only: ngrok terminates the public TLS leg, so ngrok can see
-released values. A production vault serves TLS itself.
+Also dev-setup-only: behind a TLS-terminating tunnel (ngrok http) the client
+certificate is stripped, so the server needs `-insecure-skip-client-cert` and
+release decisions rest on token + quote alone. A production vault terminates
+TLS itself, which also means no intermediary ever sees released values.
