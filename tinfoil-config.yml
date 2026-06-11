@@ -1,4 +1,4 @@
-cvm-version: "0.0.0-dev-secrets.2"
+cvm-version: "0.0.0-dev-secrets.1"
 
 cpus: 4
 memory: 4096
