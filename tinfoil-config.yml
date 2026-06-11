@@ -9,6 +9,7 @@ vault-url: "https://unfilled-elective-ecosphere.ngrok-free.dev"
 
 shim:
   upstream-port: 8080
+  tls-mode: self-signed
 
 containers:
   - name: "example-secret-keys"
