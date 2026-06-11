@@ -1,2 +1,10 @@
+# Local secrets and generated deploy artifacts — never commit.
+.env
+.env.*
+!.env.example
+
 server/secrets.json
 server/server
+server/gen/
+server/ansible/generated-files/
+server/ansible/inventory.yml

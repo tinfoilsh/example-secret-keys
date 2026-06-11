@@ -8,16 +8,30 @@
 #
 # Usage: ./dev-launch.sh [name]
 #
+# Prereq: cp .env.example .env and set VAULT_TOKEN.
+#
 # Flow: GET /deployments/preview to pull the canonical config + cmdline (these
 # are mutually consistent — the cmdline contains tinfoil-config-hash = sha256
 # of the config). The released config carries vault-url, so it flows in
-# measured, exactly as in prod. The token goes as vault_token on the
-# /dev-launch body — tinfoild writes it into external-config as `vault-token`
-# (same way controlplane will once updated).
+# measured, exactly as in prod. The token goes in external-config as
+# vault-token (same way controlplane will once updated).
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
+
+if [ ! -f .env ]; then
+	echo "error: .env missing — cp .env.example .env and fill in values" >&2
+	exit 1
+fi
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
+if [ -z "${VAULT_TOKEN:-}" ]; then
+	echo "error: VAULT_TOKEN unset in .env" >&2
+	exit 1
+fi
 
 NAME="${1:-example-secret-keys-$(date +%s)}"
 TINFOILD="${TINFOILD:-http://localhost:8080}"
@@ -30,7 +44,6 @@ REPO="tinfoilsh/example-secret-keys"
 # Cloudflare, so it 401s. In prod controlplane mints the token itself and
 # pre-injects it into additional_data, so the fallback never runs.
 DOMAIN="${DOMAIN:-example-secret-keys.dev-launch.tinfoil.dev}"
-VAULT_TOKEN="${VAULT_TOKEN:-poc-shared-secret-do-not-use}"
 
 # Box3-side path to the locally-built cvmimage. Must contain
 # tinfoilcvm.{vmlinuz,initrd,raw,hash}.
@@ -59,7 +72,7 @@ if [ -z "$LOCAL_HASH" ] || [ "$LOCAL_HASH" = "null" ]; then
 fi
 CMDLINE=$(echo "$CMDLINE" | sed -E "s/roothash=[a-f0-9]+/roothash=$LOCAL_HASH/")
 
-EXTERNAL=$(printf 'env:\n  DOMAIN: "%s"\n' "$DOMAIN")
+EXTERNAL=$(printf 'vault-token: "%s"\nenv:\n  DOMAIN: "%s"\n' "$VAULT_TOKEN" "$DOMAIN")
 
 PAYLOAD=$(jq -n \
   --arg name "$NAME" \
@@ -68,7 +81,6 @@ PAYLOAD=$(jq -n \
   --arg cmdline "$CMDLINE" \
   --arg repo "$REPO" \
   --arg tag "$RESOLVED_TAG" \
-  --arg vault_token "$VAULT_TOKEN" \
   --arg kernel "$CVMIMAGE_DIR/tinfoilcvm.vmlinuz" \
   --arg initrd "$CVMIMAGE_DIR/tinfoilcvm.initrd" \
   --arg disk "$CVMIMAGE_DIR/tinfoilcvm.raw" \
@@ -83,8 +95,7 @@ PAYLOAD=$(jq -n \
     kernel_file: $kernel,
     initrd_file: $initrd,
     disk_file: $disk,
-    skip_manifest: true,
-    vault_token: $vault_token
+    skip_manifest: true
   }')
 
 echo "POST $TINFOILD/dev-launch  name=$NAME repo=$REPO tag=$RESOLVED_TAG roothash=$LOCAL_HASH" >&2

@@ -1,0 +1,19 @@
+[Unit]
+Description=Tinfoil example-secret-keys vault
+After=network.target
+
+[Service]
+WorkingDirectory={{ vault_dir }}
+EnvironmentFile={{ env_file_path }}
+ExecStart={{ install_path }} -addr 127.0.0.1:{{ vault_port }} -secrets {{ vault_dir }}/secrets.json
+Restart=always
+User={{ vault_user }}
+Group={{ vault_user }}
+
+# Light hardening. We avoid ProtectSystem=strict because the sigstore TUF
+# client writes a cache under the service's home/tmp at startup.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

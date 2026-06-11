@@ -57,37 +57,28 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 
 2. **Run the secrets server**
 
-   The server must terminate TLS itself for the client-certificate binding to
-   be real — client certificates cannot cross a TLS-terminating proxy. On a
-   public box with the DNS name in `vault-url`:
+   The vault runs as a plain-HTTP service behind Caddy, which terminates public
+   TLS (Let's Encrypt), requests the enclave's client certificate, and forwards
+   it as a header. `server/ansible/` provisions a host end to end:
 
    ```bash
-   cd server
-   cat > secrets.json <<'EOF'
-   {"tinfoilsh/example-secret-keys": {"EXAMPLE_KEY":"my-real-key-value"}}
-   EOF
-   go run . -acme-domain vault.example.com -secrets secrets.json -token <bearer-token>
+   cp .env.example .env   # set VAULT_TOKEN (+ optional EXAMPLE_KEY for vault deploy)
+   cp server/ansible/inventory.example.yml server/ansible/inventory.yml
+   cd server && make deploy
+   ./dev-launch.sh    # reads .env for VAULT_TOKEN
    ```
 
-   For quick smoke tests behind a TLS-terminating tunnel (ngrok http), plain
-   HTTP still works but loses the requester binding:
-
-   ```bash
-   go run . -addr :8099 -secrets secrets.json -token <bearer-token> -insecure-skip-client-cert &
-   ngrok http 8099
-   ```
-
-   Either way the public URL must match the `vault-url` in the released
-   `tinfoil-config.yml` — changing it means a new tag (step 1).
+   The reference host is `dev-vault.tinfoil.sh`. Its DNS name must match the
+   `vault-url` in the released `tinfoil-config.yml` — changing it means a new
+   tag (step 1). See [`server/README.md`](./server/README.md) for details.
 
 3. **Dev-launch the CVM**
    Same shape as `secrets-demo/confidential-secret-demo`'s runbook — non-debug,
    exact cmdline (`tinfoil-config-hash = sha256(tinfoil-config.yml)`,
    `roothash = manifest.root`), pointing tinfoild at this `tinfoil-config.yml`.
    The vault URL is part of the measured config (`vault-url:`), so it arrives
-   exactly as released. The token flows as `vault_token` on the `/dev-launch`
-   body; tinfoild writes it into the external-config the CVM sees as
-   `vault-token`.
+   exactly as released. The token goes in external-config as `vault-token`
+   (via `tinctl --vault-token`, `--external-config`, or dev-launch.sh).
 
 4. **Verify through the shim**
    ```bash
@@ -100,10 +91,9 @@ tag this repo ─▶ measure-image-action ─▶ sigstore attestation (under thi
 The vault URL ships in the repo's `tinfoil-config.yml`, so it's covered by
 the measurement — neither Tinfoil nor the host provider can repoint a
 deployment at another vault. Controlplane stores only the token against the
-deployment and forwards it to tinfoild as `vault_token` on `/deployments`;
-tinfoild writes it into the external-config slot the CVM sees. `dev-launch.sh`
-is the dev-time shortcut for the same slot — it takes `VAULT_TOKEN` as an
-env var.
+deployment. Controlplane injects it into external-config as `vault-token`;
+tinfoild passes that through to the CVM. `dev-launch.sh` reads the same
+`VAULT_TOKEN` from `.env`.
 
 Same logic for the POC token — eventually injected per-account by tinfoild, not hardcoded.
 
@@ -127,7 +117,9 @@ The real fix is the per-account token injection by tinfoild — `cvmimage`
 keeps the field, but the value comes from tinfoild at deploy time, scoped to
 the account that deployed.
 
-Also dev-setup-only: behind a TLS-terminating tunnel (ngrok http) the client
-certificate is stripped, so the server needs `-insecure-skip-client-cert` and
-release decisions rest on token + quote alone. A production vault terminates
-TLS itself, which also means no intermediary ever sees released values.
+**Proxy trust.** Caddy terminates TLS and forwards the verified client
+certificate to the vault over loopback (`X-Tinfoil-Client-Cert`). The vault
+binds to `127.0.0.1` and trusts that header only because nothing else can reach
+it; Caddy overwrites any client-supplied value. A hardened deployment would put
+the vault and Caddy in the same trust boundary (same host, as here) so the
+loopback hop is not attackable.

@@ -4,8 +4,10 @@ cpus: 4
 memory: 4096
 
 # Attested location of the user-managed secrets vault. The host can't
-# redirect this without breaking the measurement.
-vault-url: "https://unfilled-elective-ecosphere.ngrok-free.dev"
+# redirect this without breaking the measurement. The enclave verifies this
+# host's public TLS certificate (Let's Encrypt, via Caddy) against the system
+# roots, so it can't be MITM'd onto a different vault.
+vault-url: "https://dev-vault.tinfoil.sh"
 
 shim:
   upstream-port: 8080
