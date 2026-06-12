@@ -5,7 +5,7 @@ After=network.target
 [Service]
 WorkingDirectory={{ vault_dir }}
 EnvironmentFile={{ env_file_path }}
-ExecStart={{ install_path }} -addr 127.0.0.1:{{ vault_port }} -secrets {{ vault_dir }}/secrets.json{% if insecure_skip_attestation | default(false) %} -insecure-skip-attestation{% endif %}
+ExecStart={{ install_path }} -addr 127.0.0.1:{{ vault_port }} -secrets {{ vault_dir }}/secrets.json{{ ' -insecure-skip-attestation' if insecure_skip_attestation | default(false) else '' }}
 Restart=always
 User={{ vault_user }}
 Group={{ vault_user }}
