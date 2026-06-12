@@ -40,7 +40,7 @@ deploy: copy-artifacts
 	test -n "$$VAULT_TOKEN" || { echo "ERROR: VAULT_TOKEN unset in .env"; exit 1; }; \
 	inv="$(INVENTORY)"; \
 	if [ ! -f "$$inv" ]; then inv="$(INVENTORY_EXAMPLE)"; fi; \
-	cd ansible && ansible-playbook -i "$$inv" playbook.yml --diff -e vault_token="$$VAULT_TOKEN"
+	ansible-playbook -i "$$inv" ansible/playbook.yml --diff -e vault_token="$$VAULT_TOKEN"
 
 # Refresh only the token + secrets.json on an already-provisioned host.
 .PHONY: deploy-secrets
@@ -50,7 +50,7 @@ deploy-secrets: copy-artifacts
 	test -n "$$VAULT_TOKEN" || { echo "ERROR: VAULT_TOKEN unset in .env"; exit 1; }; \
 	inv="$(INVENTORY)"; \
 	if [ ! -f "$$inv" ]; then inv="$(INVENTORY_EXAMPLE)"; fi; \
-	cd ansible && ansible-playbook -i "$$inv" playbook.yml --diff --tags secrets -e vault_token="$$VAULT_TOKEN"
+	ansible-playbook -i "$$inv" ansible/playbook.yml --diff --tags secrets -e vault_token="$$VAULT_TOKEN"
 
 # Run the vault locally using values from ../.env (smoke test without Caddy).
 .PHONY: run-local
