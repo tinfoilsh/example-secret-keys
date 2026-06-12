@@ -1,5 +1,0 @@
-# this is used by dev launch. It should be done by tinfoild itf
-
-vault:
-  url: "https://unfilled-elective-ecosphere.ngrok-free.dev"
-  repo: "tinfoilsh/example-secret-keys"

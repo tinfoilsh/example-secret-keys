@@ -1,0 +1,130 @@
+- name: Deploy the example-secret-keys vault
+  hosts: vault
+  become: true
+  vars:
+    app_name: "tinfoil-vault"
+    vault_user: "tinfoil-vault"
+    vault_dir: "/opt/tinfoil/vault"
+    vault_port: 8080
+    install_path: "{{ vault_dir }}/{{ app_name }}"
+    service_file_path: "/etc/systemd/system/{{ app_name }}.service"
+    env_file_path: "{{ vault_dir }}/vault.env"
+  tasks:
+    - name: Create dedicated user to run the vault
+      ansible.builtin.user:
+        name: "{{ vault_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ vault_dir }}"
+        create_home: false
+
+    - name: Create vault installation location
+      ansible.builtin.file:
+        path: "{{ vault_dir }}"
+        state: directory
+        mode: "0750"
+        owner: "{{ vault_user }}"
+        group: "{{ vault_user }}"
+
+    - name: Install vault binary
+      ansible.builtin.copy:
+        src: "./generated-files/tinfoil-vault"
+        dest: "{{ install_path }}"
+        mode: "0755"
+        owner: "{{ vault_user }}"
+        group: "{{ vault_user }}"
+      notify: Restart vault
+
+    # secrets.json and the bearer token are sensitive. They are tagged 'secrets'
+    # so `--tags secrets` can refresh just them on an already-provisioned host.
+    - name: Install secrets.json
+      ansible.builtin.copy:
+        src: "./generated-files/secrets.json"
+        dest: "{{ vault_dir }}/secrets.json"
+        mode: "0600"
+        owner: "{{ vault_user }}"
+        group: "{{ vault_user }}"
+      no_log: true
+      notify: Restart vault
+      tags:
+        - secrets
+
+    - name: Create the vault environment file (bearer token)
+      ansible.builtin.template:
+        src: templates/vault.env.j2
+        dest: "{{ env_file_path }}"
+        mode: "0600"
+        owner: "{{ vault_user }}"
+        group: "{{ vault_user }}"
+      no_log: true
+      notify: Restart vault
+      tags:
+        - secrets
+
+    - name: Create the systemd service file
+      ansible.builtin.template:
+        src: templates/tinfoil-vault.service.j2
+        dest: "{{ service_file_path }}"
+        mode: "0644"
+      notify: Restart vault
+
+    - name: Enable and start the vault service
+      ansible.builtin.systemd:
+        name: "{{ app_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: Restart vault
+      ansible.builtin.systemd:
+        name: "{{ app_name }}"
+        state: restarted
+        daemon_reload: true
+
+- name: Deploy Caddy reverse proxy (public TLS + client-cert forwarding)
+  hosts: vault
+  become: true
+  vars:
+    vault_port: 8080
+  tasks:
+    - name: Install prerequisites
+      ansible.builtin.apt:
+        pkg:
+          - curl
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: true
+
+    - name: Add Caddy repository
+      ansible.builtin.deb822_repository:
+        name: caddy-stable
+        types: deb
+        uris: https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+        suites: any-version
+        components: main
+        architectures: amd64
+        signed_by: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+        state: present
+
+    - name: Install Caddy package
+      ansible.builtin.apt:
+        pkg: caddy
+        state: present
+        update_cache: true
+
+    - name: Install Caddyfile
+      ansible.builtin.template:
+        src: templates/Caddyfile.j2
+        dest: /etc/caddy/Caddyfile
+        mode: "0644"
+        owner: root
+        group: root
+      notify: Reload Caddy
+
+  handlers:
+    - name: Reload Caddy
+      ansible.builtin.systemd:
+        name: caddy
+        state: reloaded

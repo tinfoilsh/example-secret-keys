@@ -1,0 +1,20 @@
+# Copy to inventory.yml (gitignored) and edit for your host, or pass -i inventory.example.yml
+# with overrides on the command line.
+#
+#   cp inventory.example.yml inventory.yml
+#   VAULT_TOKEN='your-secret' make deploy
+#
+vault:
+  hosts:
+    vault.example.tinfoil.sh:
+      ansible_host: vault.example.tinfoil.sh
+      ansible_user: ubuntu
+      ansible_python_interpreter: /usr/bin/python3
+      # Public domain Caddy obtains a Let's Encrypt certificate for. Must match
+      # vault-url in the workload's measured tinfoil-config.yml.
+      domain: vault.example.tinfoil.sh
+      # DEV ONLY: skip the sigstore code-identity check (SNP quote and
+      # client-certificate binding are still enforced). Only valid release
+      # decisions come from deployments that boot released, measured artifacts
+      # — remove this line to enforce.
+      insecure_skip_attestation: true

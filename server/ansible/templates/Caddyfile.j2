@@ -1,0 +1,18 @@
+{{ domain }} {
+	# Terminate public TLS with an automatic Let's Encrypt certificate and
+	# request (but do not verify) the enclave's client certificate. We don't
+	# trust it via a CA — the vault pins its key fingerprint to the attested
+	# REPORTDATA — so "request" is enough to capture it.
+	tls {
+		client_auth {
+			mode request
+		}
+	}
+
+	# Forward the client certificate (DER, base64) to the vault. header_up sets
+	# the header, overwriting anything the client sent, so it can't be spoofed.
+	# DER-base64 avoids the newline ambiguity of PEM in HTTP headers.
+	reverse_proxy 127.0.0.1:{{ vault_port | default(8080) }} {
+		header_up X-Tinfoil-Client-Cert {http.request.tls.client.certificate_der_base64}
+	}
+}

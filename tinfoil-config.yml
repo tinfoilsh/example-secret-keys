@@ -1,7 +1,9 @@
-cvm-version: "0.0.0-dev-secrets.1"
+cvm-version: "0.10.7"
 
 cpus: 4
 memory: 4096
+
+vault-url: "https://dev-vault.tinfoil.sh"
 
 shim:
   upstream-port: 8080
